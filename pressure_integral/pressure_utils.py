@@ -264,7 +264,7 @@ def get_vol_av_p_from_params(epsilon : float, kappa : float, delta : float, A : 
         N = kwargs.get('N',500)
         if N <=0 or not isinstance(N, int):
             raise ValueError("Grid resolution N must be a positive integer for contour method.")
-        xs, ys = extract_zero_contour(psi, x_lim=(0.5, 1.5), y_lim=(-0.5, 0.5), n=N)
+        xs, ys = extract_zero_contour(psi, x_lim=(0, 2), y_lim=(-1,1), n=N)                                    #x and y lims are hard coded... should be figures out programatically by finding limits of parametric curve.
         num = int_contour_boundary(G, xs, ys)
         denom = int_contour_boundary(func_for_vol, xs, ys)
         return num/denom
