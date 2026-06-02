@@ -129,13 +129,13 @@ def extract_zero_contour(psi, x_lim, y_lim, n=500):
     Z = psi(X, Y)
 
     gen = contour_generator(x=x, y=y, z=Z)
-    lines = gen.lines(0.0)   # list of (N, 2) arrays, one per connected component
+    lines = [l for l in gen.lines(0.0) if l is not None]
 
     if not lines:
         raise ValueError("No zero contour found within the specified domain.")
 
     # Keep the longest loop — that is the plasma boundary
-    seg = max(lines, key=len)
+    seg = np.asarray(max(lines, key=len))
     xs, ys = seg[:, 0].copy(), seg[:, 1].copy()
 
     # Ensure the polygon is explicitly closed
