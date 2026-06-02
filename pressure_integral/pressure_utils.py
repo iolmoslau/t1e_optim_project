@@ -251,17 +251,23 @@ def get_vol_av_p_from_params(epsilon : float, kappa : float, delta : float, A : 
 
     G = lambda x, y: G_total(x, y, A, c)
 
+    func_for_vol = lambda x,y: x*y
     if method == 'parametric':
         h = kwargs.get('h',0.1)
         if h <= 0:
             raise ValueError("Step size h must be non zero and positive for parametric method.")
-        return int_parametric_boundary(G,epsilon,kappa,delta,h=h)
+        num = int_parametric_boundary(G,epsilon,kappa,delta,h=h)
+        denom = int_parametric_boundary(func_for_vol,epsilon,kappa,delta,h=h)
+
+        return num/denom
     elif method == 'contour':
         N = kwargs.get('N',500)
         if N <=0 or not isinstance(N, int):
             raise ValueError("Grid resolution N must be a positive integer for contour method.")
         xs, ys = extract_zero_contour(psi, x_lim=(0.5, 1.5), y_lim=(-0.5, 0.5), n=N)
-        return int_contour_boundary(G, xs, ys)
+        num = int_contour_boundary(G, xs, ys)
+        denom = int_contour_boundary(func_for_vol, xs, ys)
+        return num/denom
     elif method == 'masking':
         return None  # TODO: implement masking method
     else:
