@@ -102,61 +102,6 @@ def make_psi(epsilon, kappa, delta, A=-0.05):
     return psi, C, A
 
 
-def theta_from_x(epsilon, delta, x_target, upper=True, tol=1e-12, max_iter=50):
-    """
-    Invert  x = 1 + epsilon * cos(theta + arcsin(delta) * sin(theta))
-    for theta using the secant method.
-
-    Parameters
-    ----------
-    epsilon  : float – inverse aspect ratio
-    delta    : float – triangularity
-    x_target : float – target x value; must be in [1-epsilon, 1+epsilon]
-    upper    : bool  – True  → search theta in [0,   pi]  (upper boundary, y >= 0)
-                       False → search theta in [pi, 2*pi] (lower boundary, y <= 0)
-    tol      : float – convergence tolerance on |f(theta)|
-    max_iter : int   – maximum secant iterations
-
-    Returns
-    -------
-    theta : float
-
-    Note
-    ----
-    kappa does not appear in the x-equation so it is not a parameter here.
-    The two solutions in [0, 2*pi] correspond to the upper/lower halves of
-    the boundary; use the `upper` flag to select which one.
-    """
-    alpha = np.arcsin(delta)
-
-    def f(theta):
-        return 1.0 + epsilon * np.cos(theta + alpha * np.sin(theta)) - x_target
-
-    # Zeroth-order approximation (ignores the alpha correction) as first guess
-    ratio = np.clip((x_target - 1.0) / epsilon, -1.0, 1.0)
-    theta1 = np.arccos(ratio)          # in [0, pi]
-    if not upper:
-        theta1 = 2.0 * np.pi - theta1  # mirror into [pi, 2*pi]
-
-    # Second guess: small step away from theta1
-    step = 0.05
-    theta0 = theta1 + step if theta1 - step < (0 if upper else np.pi) else theta1 - step
-
-    f0 = f(theta0)
-    f1 = f(theta1)
-
-    for _ in range(max_iter):
-        denom = f1 - f0
-        if abs(denom) < 1e-15:
-            break
-        theta2 = theta1 - f1 * (theta1 - theta0) / denom
-        theta0, f0 = theta1, f1
-        theta1, f1 = theta2, f(theta2)
-        if abs(f1) < tol:
-            break
-
-    return theta1
-
 
 def extract_zero_contour(psi, x_lim, y_lim, n=500):
     """
