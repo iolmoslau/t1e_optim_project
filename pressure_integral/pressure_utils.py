@@ -1,6 +1,7 @@
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'ITER_Equilibria'))
+sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
 from contourpy import contour_generator
@@ -37,6 +38,10 @@ def make_psi(epsilon, kappa, delta, A=-0.05):
     psi : callable(x, y) -> float or ndarray
         Evaluates ψ at the point(s) (x, y).  x and y may be scalars or
         NumPy arrays of any shape.
+    c : ndarray, shape (7,)
+        Coefficients c[0]…c[6] for the homogeneous basis functions ψ₁…ψ₇.
+    A : float
+        The profile parameter (echoed back so callers need not track it).
     """
     alpha = np.arcsin(delta)
     curv1 = -(1 + alpha)**2 / (epsilon * kappa**2)
@@ -94,7 +99,7 @@ def make_psi(epsilon, kappa, delta, A=-0.05):
               + C[4]*psi5(x,y)  + C[5]*psi6(x,y)  + C[6]*psi7(x,y)
               + A*psipart1(x,y) + (1-A)*psipart2(x,y))
 
-    return psi
+    return psi, C, A
 
 
 def theta_from_x(epsilon, delta, x_target, upper=True, tol=1e-12, max_iter=50):
@@ -153,5 +158,137 @@ def theta_from_x(epsilon, delta, x_target, upper=True, tol=1e-12, max_iter=50):
     return theta1
 
 
+def extract_zero_contour(psi, x_lim, y_lim, n=500):
+    """
+    Extract the zero contour of psi(x, y) as a closed polygon.
+
+    Evaluates psi on an n×n grid over [x_lim, y_lim], runs marching squares
+    via contourpy, and returns the longest closed loop (the main plasma
+    boundary, ignoring any spurious small loops near the grid edges).
+
+    Parameters
+    ----------
+    psi   : callable(x, y) -> ndarray  – poloidal flux function
+    x_lim : (float, float)             – (x_min, x_max) of the evaluation grid
+    y_lim : (float, float)             – (y_min, y_max) of the evaluation grid
+    n     : int                        – grid resolution per axis (default 500)
+
+    Returns
+    -------
+    xs, ys : ndarray, shape (N+1,)
+        Closed polygon vertices (first == last point).
+    """
+    x = np.linspace(x_lim[0], x_lim[1], n)
+    y = np.linspace(y_lim[0], y_lim[1], n)
+    X, Y = np.meshgrid(x, y)
+    Z = psi(X, Y)
+
+    gen = contour_generator(x=x, y=y, z=Z)
+    lines = gen.lines(0.0)   # list of (N, 2) arrays, one per connected component
+
+    if not lines:
+        raise ValueError("No zero contour found within the specified domain.")
+
+    # Keep the longest loop — that is the plasma boundary
+    seg = max(lines, key=len)
+    xs, ys = seg[:, 0].copy(), seg[:, 1].copy()
+
+    # Ensure the polygon is explicitly closed
+    if xs[0] != xs[-1] or ys[0] != ys[-1]:
+        xs = np.append(xs, xs[0])
+        ys = np.append(ys, ys[0])
+
+    # Normalise to counterclockwise orientation (positive shoelace area)
+    signed_area = 0.5 * np.sum(xs[:-1] * ys[1:] - xs[1:] * ys[:-1])
+    if signed_area < 0:
+        xs, ys = xs[::-1], ys[::-1]
+
+    return xs, ys
 
 
+def int_parametric_boundary(G, epsilon, kappa, delta, h):
+    """
+    Compute  ∬_Ω f(x,y) dxdy  via Green's theorem as a boundary line integral,
+    where G is the y-antiderivative of f:  ∂G/∂y = f.
+
+    By Green's theorem with a counterclockwise boundary (choosing P=-G, Q=0):
+
+        ∬_Ω f dxdy  =  -∮_∂Ω G(x,y) dx
+                     =  -∫_0^{2π} G(x(θ), y(θ)) · (dx/dθ) dθ
+
+    The boundary ∂Ω is the Solovev parametric curve
+
+        x(θ) = 1 + ε·cos(θ + arcsin(δ)·sin(θ))
+        y(θ) = ε·κ·sin(θ),   θ ∈ [0, 2π]
+
+    The integral over θ is approximated with the midpoint rule at step size h.
+
+    Parameters
+    ----------
+    G       : callable(x, y) -> ndarray  – y-antiderivative of f, i.e. ∂G/∂y = f
+    epsilon : float  – inverse aspect ratio
+    kappa   : float  – elongation
+    delta   : float  – triangularity
+    h       : float  – step size in θ for the midpoint rule
+
+    Returns
+    -------
+    integral : float
+
+    Example
+    -------
+    from psi_anti_deriv_exact import G_total
+    psi, c, A = make_psi(epsilon, kappa, delta)
+    G = lambda x, y: G_total(x, y, A, c)
+    result = int_parametric_boundary(G, epsilon, kappa, delta, h=0.01)
+    """
+    alpha = np.arcsin(delta)
+
+    N = max(1, int(np.ceil(2.0 * np.pi / h)))
+    dtheta = 2.0 * np.pi / N
+    theta = (np.arange(N) + 0.5) * dtheta   # midpoints
+
+    x = 1.0 + epsilon * np.cos(theta + alpha * np.sin(theta))
+    y = epsilon * kappa * np.sin(theta)
+    dxdtheta = -epsilon * np.sin(theta + alpha * np.sin(theta)) * (1.0 + alpha * np.cos(theta))
+
+    return -float(np.sum(G(x, y) * dxdtheta) * dtheta)
+
+
+def int_contour_boundary(G, xs, ys):
+    """
+    Compute  ∬_Ω f(x,y) dxdy  via Green's theorem using a piecewise-linear
+    zero contour as the boundary, with the midpoint rule on each edge.
+
+    Identical in principle to int_parametric_boundary but the boundary is
+    supplied as a closed polygon (e.g. from extract_zero_contour) rather than
+    the analytic parametric curve.
+
+        ∬_Ω f dxdy  =  -∮_∂Ω G(x,y) dx
+                     ≈  -∑_i  G(x_mid_i, y_mid_i) · Δx_i
+
+    where the sum runs over all edges of the polygon, x_mid and y_mid are the
+    edge midpoints, and Δx = x_{i+1} - x_i.
+
+    Parameters
+    ----------
+    G    : callable(x, y) -> ndarray  – y-antiderivative of f, i.e. ∂G/∂y = f
+    xs   : array-like, shape (N+1,)   – x-coordinates of closed polygon vertices
+    ys   : array-like, shape (N+1,)   – y-coordinates of closed polygon vertices
+                                        (first and last points must coincide)
+
+    Returns
+    -------
+    integral : float
+    """
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+
+    x0, x1 = xs[:-1], xs[1:]
+    y0, y1 = ys[:-1], ys[1:]
+
+    x_mid = 0.5 * (x0 + x1)
+    y_mid = 0.5 * (y0 + y1)
+    dx    = x1 - x0
+
+    return -float(np.sum(G(x_mid, y_mid) * dx))
