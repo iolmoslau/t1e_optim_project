@@ -5,6 +5,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
 from contourpy import contour_generator
+
+from psi_anti_deriv_exact import G_total
+
 from ExactSolutions import (
     psi1, psi2, psi3, psi4, psi5, psi6, psi7,
     psi8, psi9, psi10, psi11, psi12,
@@ -237,3 +240,32 @@ def int_contour_boundary(G, xs, ys):
     dx    = x1 - x0
 
     return -float(np.sum(G(x_mid, y_mid) * dx))
+
+
+def get_vol_av_p_from_params(epsilon : float, kappa : float, delta : float, A : float = -0.5, method : str = 'contour', **kwargs):
+    
+
+
+
+    psi, c, _ = make_psi(epsilon, kappa, delta, A)
+
+    G = lambda x, y: G_total(x, y, A, c)
+
+    if method == 'parametric':
+        h = kwargs.get('h',0.1)
+        if h <= 0:
+            raise ValueError("Step size h must be non zero and positive for parametric method.")
+        return int_parametric_boundary(G,epsilon,kappa,delta,h=h)
+    elif method == 'contour':
+        N = kwargs.get('N',500)
+        if N <=0 or not isinstance(N, int):
+            raise ValueError("Grid resolution N must be a positive integer for contour method.")
+        xs, ys = extract_zero_contour(psi, x_lim=(0.5, 1.5), y_lim=(-0.5, 0.5), n=N)
+        return int_contour_boundary(G, xs, ys)
+    elif method == 'masking':
+        return None  # TODO: implement masking method
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+
+
