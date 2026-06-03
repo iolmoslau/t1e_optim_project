@@ -7,6 +7,46 @@ import numpy as np
 from pressure_utils import get_vol_av_p_from_params
 
 
+
+def initialize_population(N: int, delta_range: tuple, kappa_range: tuple, epsilon_range: tuple) -> np.ndarray:
+
+    """
+    Returns population : n x 3 array of members
+
+    Columns:
+
+        0 -> delta
+
+        1 -> kappa
+
+        2 -> epsilon
+
+    """
+
+    if N <= 0:
+
+        raise ValueError("Population size N must be positive.")
+
+
+
+    delta_low, delta_high = delta_range
+    kappa_low, kappa_high = kappa_range
+    epsilon_low, epsilon_high = epsilon_range
+
+
+
+    deltas = np.random.uniform(delta_low,delta_high,N)
+    kappas = np.random.uniform(kappa_low,kappa_high,N)
+    epsilons = np.random.uniform(epsilon_low,epsilon_high,N)
+
+    population = np.column_stack((deltas, kappas, epsilons))
+
+    return population
+
+
+
+
+
 def evaluate_population(params: np.ndarray, A: float = -0.5,
                          method: str = 'contour', **kwargs) -> np.ndarray:
     """
@@ -143,3 +183,36 @@ def crossover(parents_a: np.ndarray, parents_b: np.ndarray,
                          "Choose 'uniform', 'arithmetic', or 'blx_alpha'.")
 
     return children
+
+
+def mutate(offspring: np.ndarray, sigma2: float) -> np.ndarray:
+    """
+    Apply random mutation to a population of offspring.
+
+    For each individual, draw p ~ Uniform(0, 1) and add noise ~ N(0, sigma2)
+    to parameter i if p falls in the i-th equal partition of (0, 1):
+        i=0 (epsilon) : p in [0,   1/3)
+        i=1 (kappa)   : p in [1/3, 2/3)
+        i=2 (delta)   : p in [2/3, 1)
+
+    Each individual gets exactly one parameter mutated, chosen with equal
+    probability 1/3.
+
+    Parameters
+    ----------
+    offspring : ndarray, shape (N, 3)
+    sigma2    : float  – variance of the Gaussian noise
+
+    Returns
+    -------
+    mutated : ndarray, shape (N, 3)  – copy of offspring with mutations applied
+    """
+    mutated = np.array(offspring, dtype=float)
+    N = mutated.shape[0]
+
+    p = np.random.uniform(0, 1, size=N)
+    i = np.minimum((p * 3).astype(int), 2)   # map to 0, 1, or 2
+    noise = np.random.normal(0, np.sqrt(sigma2), size=N)
+
+    mutated[np.arange(N), i] += noise
+    return mutated
