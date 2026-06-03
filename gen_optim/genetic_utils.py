@@ -75,3 +75,71 @@ def select_parents(params: np.ndarray, fitnesses: np.ndarray,
     parents_b = params[winners[N:]]
 
     return parents_a, parents_b
+
+
+def crossover(parents_a: np.ndarray, parents_b: np.ndarray,
+              method: str = 'uniform', **kwargs) -> np.ndarray:
+    """
+    Produce N children from N mating pairs.
+
+    Parameters
+    ----------
+    parents_a : ndarray, shape (N, 3)
+    parents_b : ndarray, shape (N, 3)
+    method    : 'uniform' | 'arithmetic' | 'blx_alpha'
+
+    kwargs for 'blx_alpha'
+    ----------------------
+    alpha  : float – extension factor beyond the parents' interval (default 0.5)
+    bounds : array-like, shape (3, 2) – [[eps_min, eps_max],
+                                          [kap_min, kap_max],
+                                          [dlt_min, dlt_max]]
+             Children are clipped to these bounds after sampling.
+
+    Returns
+    -------
+    children : ndarray, shape (N, 3)
+    """
+    a = np.asarray(parents_a, dtype=float)
+    b = np.asarray(parents_b, dtype=float)
+
+    if a.shape != b.shape or a.ndim != 2 or a.shape[1] != 3:
+        raise ValueError("parents_a and parents_b must both be shape (N, 3)")
+
+    N = a.shape[0]
+
+    if method == 'uniform':
+        # Each gene is drawn independently from one of the two parents.
+        mask = np.random.randint(0, 2, size=(N, 3)).astype(bool)
+        children = np.where(mask, a, b)
+
+    elif method == 'arithmetic':
+        # Each child is a random convex combination of its two parents.
+        # One λ per pair, broadcast across all 3 genes.
+        lam = np.random.uniform(0, 1, size=(N, 1))
+        children = lam * a + (1 - lam) * b
+
+    elif method == 'blx_alpha':
+        alpha  = float(kwargs.get('alpha', 0.5))
+        bounds = kwargs.get('bounds', None)
+
+        lo_parent = np.minimum(a, b)
+        hi_parent = np.maximum(a, b)
+        span      = hi_parent - lo_parent
+
+        lo_sample = lo_parent - alpha * span
+        hi_sample = hi_parent + alpha * span
+
+        children = np.random.uniform(lo_sample, hi_sample)
+
+        if bounds is not None:
+            bounds = np.asarray(bounds, dtype=float)   # shape (3, 2)
+            lo_bounds = bounds[:, 0]
+            hi_bounds = bounds[:, 1]
+            children = np.clip(children, lo_bounds, hi_bounds)
+
+    else:
+        raise ValueError(f"Unknown crossover method: '{method}'. "
+                         "Choose 'uniform', 'arithmetic', or 'blx_alpha'.")
+
+    return children
