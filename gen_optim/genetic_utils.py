@@ -8,40 +8,27 @@ from pressure_utils import get_vol_av_p_from_params
 
 
 
-def initialize_population(N: int, delta_range: tuple, kappa_range: tuple, epsilon_range: tuple) -> np.ndarray:
-
+def initialize_population(N: int, epsilon_range: tuple, kappa_range: tuple, delta_range: tuple) -> np.ndarray:
     """
-    Returns population : n x 3 array of members
+    Returns population : N x 3 array of members.
 
     Columns:
-
-        0 -> delta
-
+        0 -> epsilon
         1 -> kappa
-
-        2 -> epsilon
-
+        2 -> delta
     """
-
     if N <= 0:
-
         raise ValueError("Population size N must be positive.")
 
-
-
-    delta_low, delta_high = delta_range
-    kappa_low, kappa_high = kappa_range
     epsilon_low, epsilon_high = epsilon_range
+    kappa_low,   kappa_high   = kappa_range
+    delta_low,   delta_high   = delta_range
 
+    epsilons = np.random.uniform(epsilon_low, epsilon_high, N)
+    kappas   = np.random.uniform(kappa_low,   kappa_high,   N)
+    deltas   = np.random.uniform(delta_low,   delta_high,   N)
 
-
-    deltas = np.random.uniform(delta_low,delta_high,N)
-    kappas = np.random.uniform(kappa_low,kappa_high,N)
-    epsilons = np.random.uniform(epsilon_low,epsilon_high,N)
-
-    population = np.column_stack((deltas, kappas, epsilons))
-
-    return population
+    return np.column_stack((epsilons, kappas, deltas))
 
 
 
@@ -185,7 +172,10 @@ def crossover(parents_a: np.ndarray, parents_b: np.ndarray,
     return children
 
 
-def mutate(offspring: np.ndarray, sigma2: float) -> np.ndarray:
+def mutate(offspring: np.ndarray, sigma2: float,
+           epsilon_range: tuple | None = None,
+           kappa_range:   tuple | None = None,
+           delta_range:   tuple | None = None) -> np.ndarray:
     """
     Apply random mutation to a population of offspring.
 
@@ -196,12 +186,15 @@ def mutate(offspring: np.ndarray, sigma2: float) -> np.ndarray:
         i=2 (delta)   : p in [2/3, 1)
 
     Each individual gets exactly one parameter mutated, chosen with equal
-    probability 1/3.
+    probability 1/3.  Mutated values are clipped to the supplied ranges.
 
     Parameters
     ----------
-    offspring : ndarray, shape (N, 3)
-    sigma2    : float  – variance of the Gaussian noise
+    offspring     : ndarray, shape (N, 3)
+    sigma2        : float        – variance of the Gaussian noise
+    epsilon_range : (lo, hi)     – allowed range for epsilon (column 0)
+    kappa_range   : (lo, hi)     – allowed range for kappa   (column 1)
+    delta_range   : (lo, hi)     – allowed range for delta   (column 2)
 
     Returns
     -------
@@ -211,8 +204,13 @@ def mutate(offspring: np.ndarray, sigma2: float) -> np.ndarray:
     N = mutated.shape[0]
 
     p = np.random.uniform(0, 1, size=N)
-    i = np.minimum((p * 3).astype(int), 2)   # map to 0, 1, or 2
+    i = np.minimum((p * 3).astype(int), 2)
     noise = np.random.normal(0, np.sqrt(sigma2), size=N)
 
     mutated[np.arange(N), i] += noise
+
+    for col, rng in enumerate([epsilon_range, kappa_range, delta_range]):
+        if rng is not None:
+            mutated[:, col] = np.clip(mutated[:, col], rng[0], rng[1])
+
     return mutated
