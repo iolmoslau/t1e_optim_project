@@ -259,7 +259,7 @@ def get_vol_av_p_from_params(epsilon : float, kappa : float, delta : float, A : 
         num = int_parametric_boundary(G,epsilon,kappa,delta,h=h)
         denom = int_parametric_boundary(func_for_vol,epsilon,kappa,delta,h=h)
 
-        return num/denom
+        return -(1-A)*num/denom
     elif method == 'contour':
         N = kwargs.get('N',500)
         if N <=0 or not isinstance(N, int):
@@ -267,7 +267,7 @@ def get_vol_av_p_from_params(epsilon : float, kappa : float, delta : float, A : 
         xs, ys = extract_zero_contour(psi, x_lim=(0, 2), y_lim=(-1,1), n=N)                                    #x and y lims are hard coded... should be figures out programatically by finding limits of parametric curve.
         num = int_contour_boundary(G, xs, ys)
         denom = int_contour_boundary(func_for_vol, xs, ys)
-        return num/denom
+        return -(1-A)*num/denom
     elif method == 'masking':
         return None  # TODO: implement masking method
     else:
