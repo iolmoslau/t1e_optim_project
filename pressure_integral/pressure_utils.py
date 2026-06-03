@@ -251,10 +251,14 @@ def int_contour_boundary(G, xs, ys):
     return -float(np.sum(G(x_mid, y_mid) * dx))
 
 
-def get_vol_av_p_from_params(epsilon : float, kappa : float, delta : float, A : float = -0.5, method : str = 'contour', **kwargs):
+def get_vol_av_p_from_params(epsilon, kappa, delta, A: float = -0.5, method: str = 'contour', **kwargs):
 
 
 
+
+    if np.ndim(epsilon) > 0 or np.ndim(kappa) > 0 or np.ndim(delta) > 0:
+        _scalar = lambda e, k, d: get_vol_av_p_from_params(e, k, d, A, method, **kwargs)
+        return np.vectorize(_scalar)(epsilon, kappa, delta)
 
     psi, c, _ = make_psi(epsilon, kappa, delta, A)
 
