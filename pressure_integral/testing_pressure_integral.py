@@ -1,8 +1,7 @@
 """
 testing_pressure_integral.py
 
-Runs test_method_2 (int_parametric_boundary) and test_method_3
-(int_contour_boundary), then prints a unified comparison table.
+Runs test_method_3 (int_contour_boundary) and prints a comparison table.
 """
 
 import sys
@@ -15,10 +14,9 @@ import numpy as np
 
 warnings.filterwarnings('ignore')   # suppress log(0) RuntimeWarnings
 
-from pressure_integral.test_method_2 import collect_results as m2
 from pressure_integral.test_method_3 import collect_results as m3
 
-results = m2() + m3()
+results = m3()
 
 def fmt_num(v):
     if v is None or (isinstance(v, float) and np.isnan(v)):
