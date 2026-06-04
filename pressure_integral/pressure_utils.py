@@ -326,3 +326,94 @@ def int_masking(epsilon,kappa,delta,A, N):
   p_avg = numerator / denominator
 
   return p_avg
+
+
+def poloidal_circum(psi, x_lim: tuple, y_lim: tuple, N: int = 500) -> float:
+    """
+    Approximate the poloidal circumference of the zero contour of psi.
+
+    Extracts the zero contour as a closed polygon via extract_zero_contour,
+    then sums the Euclidean lengths of all edges.
+
+    Parameters
+    ----------
+    psi   : callable(x, y) -> ndarray  – poloidal flux function
+    x_lim : (x_min, x_max)             – grid extent passed to extract_zero_contour
+    y_lim : (y_min, y_max)             – grid extent passed to extract_zero_contour
+    N     : int                        – marching-squares grid resolution (default 500)
+
+    Returns
+    -------
+    circumference : float
+    """
+    xs, ys = extract_zero_contour(psi, x_lim, y_lim, n=N)
+
+    dx = xs[1:] - xs[:-1]
+    dy = ys[1:] - ys[:-1]
+
+    return float(np.sum(np.sqrt(dx**2 + dy**2)))
+
+
+def integral_multiplier(epsilon: float, kappa: float, delta: float,
+                        A: float, N: int = 500) -> float:
+    """
+    Compute  iint_Omega  [A + (1-A)*x^2] / x  dx dy
+
+    using the Green's theorem contour method.  The y-antiderivative of the
+    integrand f(x,y) = A/x + (1-A)*x  is  G(x,y) = y*[A/x + (1-A)*x].
+
+    Parameters
+    ----------
+    epsilon : float  – inverse aspect ratio
+    kappa   : float  – elongation
+    delta   : float  – triangularity
+    A       : float  – Solov'ev profile parameter
+    N       : int    – marching-squares grid resolution for the zero contour
+
+    Returns
+    -------
+    value : float
+    """
+    psi, _, _ = make_psi(epsilon, kappa, delta, A)
+
+    x_lim = (1 - epsilon - 0.1, 1 + epsilon + 0.1)
+    y_lim = (-kappa * epsilon - 0.1, kappa * epsilon + 0.1)
+
+    xs, ys = extract_zero_contour(psi, x_lim, y_lim, n=N)
+
+    G = lambda x, y: y * (A / x + (1 - A) * x)
+
+    return int_contour_boundary(G, xs, ys)
+
+
+def beta_poloidal(epsilon, kappa, delta, A=-0.5, N=500):
+
+    psi, c, _ = make_psi(epsilon, kappa, delta, A)
+
+    x_lim = (1 - epsilon - 0.1, 1 + epsilon + 0.1)
+    y_lim = (-kappa * epsilon - 0.1, kappa * epsilon + 0.1)
+
+    xs, ys = extract_zero_contour(psi, x_lim, y_lim, n=N)
+
+    circum       = poloidal_circum(psi, x_lim, y_lim, N=N)
+    volume       = int_contour_boundary(lambda x, y: x * y, xs, ys)
+    psi_integral = int_contour_boundary(lambda x, y: G_total(x, y, A, c), xs, ys)
+    factor       = int_contour_boundary(lambda x, y: y * (A / x + (1 - A) * x), xs, ys)
+
+    beta_p = -2 * (1 - A) * (circum**2 / volume) * psi_integral * factor**(-2)
+
+    return beta_p
+
+def beta_toroidal(epsilon,kappa,delta,A=-0.5,q = 2,N=500):
+
+    beta_p = beta_poloidal(epsilon,kappa,delta,A,N)
+
+    beta_t = epsilon**2*beta_p/q**2
+
+    return beta_t
+
+
+
+
+
+
