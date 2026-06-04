@@ -8,11 +8,23 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 import numpy as np
 
 from jax import config
 
 config.update("jax_enable_x64", True)
+
+# Match the legacy import layout used by pressure_integral/test_beta.py.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+for module_dir in (
+    PROJECT_ROOT,
+    PROJECT_ROOT / "ITER_Equilibria",
+    PROJECT_ROOT / "pressure_integral",
+):
+    module_path = str(module_dir)
+    if module_path not in sys.path:
+        sys.path.insert(0, module_path)
 
 import jax
 import jax.numpy as jnp
@@ -20,7 +32,7 @@ from sklearn.utils._tags import default_tags
 from skopt import dummy_minimize, forest_minimize, gbrt_minimize, gp_minimize
 from skopt.learning.gbrt import GradientBoostingQuantileRegressor
 from skopt.space import Real
-from pressure_integral.pressure_utils import get_vol_av_p_from_params
+from pressure_integral.pressure_utils import beta_toroidal
 
 # Fix scikit-optimize GBRT compatibility with newer scikit-learn tag handling.
 GradientBoostingQuantileRegressor.__sklearn_tags__ = lambda self: default_tags(self)
@@ -253,23 +265,22 @@ def negative_pressure_from_raw(raw, A=DEFAULT_A, bounds=DEFAULT_BOUNDS, n_quad=2
 
 
 def objective_np(shape, A=DEFAULT_A, n_quad=2048):
-    """Evaluate the average pressure on a plain NumPy-like shape vector.
+    """Evaluate beta_toroidal on a plain NumPy-like shape vector.
 
     This wrapper is intended for Bayesian optimization.
     """
     epsilon, kappa, delta = shape
     with np.errstate(divide="ignore", invalid="ignore"):
-        return float(get_vol_av_p_from_params(
+        return float(beta_toroidal(
             epsilon,
             kappa,
             delta,
             A=A,
-            method="contour",
             N=int(n_quad),
         ))
 
 
-def negative_pressure_np(shape, A=DEFAULT_A, n_quad=2048):
+def negative_beta_np(shape, A=DEFAULT_A, n_quad=2048):
     """Negated objective for minimizers expecting lower-is-better."""
     return -objective_np(shape, A=A, n_quad=n_quad)
 
@@ -298,6 +309,7 @@ def _validate_bounds(bounds):
 
 def optimize_shape_bayesian(
     bounds=DEFAULT_BOUNDS,
+    A=DEFAULT_A,
     n_calls=50,
     n_initial_points=10,
     random_state=0,
@@ -311,7 +323,7 @@ def optimize_shape_bayesian(
     # Build search space and run BO using the requested surrogate model.
     # The objective is negated because the optimizer expects lower-is-better.
     search_space = _build_bo_space(bounds)
-    objective = lambda x: negative_pressure_np(x, n_quad=n_quad)
+    objective = lambda x: negative_beta_np(x, A=A, n_quad=n_quad)
     surrogate = str(surrogate).lower()
 
     if surrogate == "gp":
@@ -359,23 +371,23 @@ def optimize_shape_bayesian(
         )
 
     best_shape = tuple(bo_result.x)
-    best_pressure = objective_np(best_shape, n_quad=n_quad)
-    coefficients = solve_coefficients(*best_shape, A=DEFAULT_A)
+    best_beta = objective_np(best_shape, A=A, n_quad=n_quad)
+    coefficients = solve_coefficients(*best_shape, A=A)
     raw = unconstrained_from_bounded(jnp.asarray(best_shape), bounds)
 
     if bo_result.x_iters:
         first_shape = tuple(bo_result.x_iters[0])
-        first_pressure = objective_np(first_shape, n_quad=n_quad)
+        first_beta = objective_np(first_shape, A=A, n_quad=n_quad)
     else:
         first_shape = best_shape
-        first_pressure = best_pressure
+        first_beta = best_beta
 
     return {
         "initial_shape": jnp.asarray(first_shape),
-        "initial_pressure": first_pressure,
+        "initial_beta_toroidal": first_beta,
         "raw_initial": unconstrained_from_bounded(jnp.asarray(first_shape), bounds),
         "shape": jnp.asarray(best_shape),
-        "pressure": best_pressure,
+        "beta_toroidal": best_beta,
         "coefficients": coefficients,
         "raw": raw,
         "optimizer": bo_result,
@@ -393,73 +405,51 @@ def run_unit_tests(
     A=DEFAULT_A,
     bounds=DEFAULT_BOUNDS,
     n_quad=2048,
-    gradient_tol=1e-5,
-    hessian_tol=1e-8,
     perturbation_tol=1e-9,
     perturbation_radius=1e-3,
     perturbation_samples=100,
     perturbation_seed=0,
     active_bound_tol=1e-4,
 ):
-    """Run local optimality checks around the optimizer result."""
+    """Run local perturbation checks around the optimizer result."""
     import numpy as np
 
     bounds = _validate_bounds(bounds)
-    bounds_array = jnp.asarray(bounds)
+    bounds_array = np.asarray(bounds, dtype=float)
     low = bounds_array[:, 0]
     high = bounds_array[:, 1]
     names = ("epsilon", "kappa", "delta")
 
-    raw = result["raw"]
-    shape = result["shape"]
-    pressure = result["pressure"]
-    pressure_objective = lambda z: pressure_from_raw(z, A=A, bounds=bounds, n_quad=n_quad)
-
-    gradient = jax.grad(pressure_objective)(raw)
-    gradient_norm = float(jnp.linalg.norm(gradient))
-
-    hessian = jax.hessian(pressure_objective)(raw)
-    all_hessian_eigenvalues = np.linalg.eigvalsh(np.asarray(hessian))
+    shape = np.asarray(result["shape"], dtype=float)
+    beta = float(result["beta_toroidal"])
 
     lower_active = shape <= low + active_bound_tol
     upper_active = shape >= high - active_bound_tol
     free_indices = [
-        i for i, is_free in enumerate(np.asarray(~(lower_active | upper_active))) if is_free
+        i for i, is_free in enumerate(~(lower_active | upper_active)) if is_free
     ]
-    if free_indices:
-        reduced_hessian = np.asarray(hessian)[np.ix_(free_indices, free_indices)]
-        reduced_eigenvalues = np.linalg.eigvalsh(reduced_hessian)
-        hessian_pass = bool(np.max(reduced_eigenvalues) < -hessian_tol)
-    else:
-        reduced_eigenvalues = np.array([])
-        hessian_pass = True
 
-    key = jax.random.PRNGKey(int(perturbation_seed))
-    directions = jax.random.normal(key, (int(perturbation_samples), 3), dtype=shape.dtype)
-    directions = jnp.where(upper_active, -jnp.abs(directions), directions)
-    directions = jnp.where(lower_active, jnp.abs(directions), directions)
-    directions = directions / jnp.linalg.norm(directions, axis=1, keepdims=True)
+    rng = np.random.default_rng(int(perturbation_seed))
+    directions = rng.normal(size=(int(perturbation_samples), 3))
+    directions = np.where(upper_active, -np.abs(directions), directions)
+    directions = np.where(lower_active, np.abs(directions), directions)
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
     perturbations = float(perturbation_radius) * directions
-    points = jnp.clip(shape + perturbations, low, high)
-    perturbed_pressures = jnp.asarray(
-        [volume_averaged_pressure(*point, A=A, n_quad=n_quad) for point in points]
+    points = np.clip(shape + perturbations, low, high)
+    perturbed_betas = np.asarray(
+        [objective_np(point, A=A, n_quad=n_quad) for point in points]
     )
-    max_perturbed_pressure = float(jnp.max(perturbed_pressures))
+    max_perturbed_beta = float(np.max(perturbed_betas))
 
     checks = {
-        "gradient": gradient_norm <= gradient_tol,
-        "hessian": hessian_pass,
-        "perturbation": max_perturbed_pressure <= float(pressure) + perturbation_tol,
+        "perturbation": max_perturbed_beta <= beta + perturbation_tol,
     }
 
     free_names = [names[i] for i in free_indices] or ["none"]
     print("Unit tests:")
-    print(f"  Gradient norm: {gradient_norm:.6e} <= {gradient_tol:.6e}")
-    print(f"  Full Hessian eigenvalues: {all_hessian_eigenvalues}")
-    print(f"  Free Hessian variables: {', '.join(free_names)}")
-    print(f"  Free Hessian eigenvalues: {reduced_eigenvalues}")
-    print(f"  Max perturbed pressure: {max_perturbed_pressure:.12g}")
-    print(f"  Optimum pressure: {float(pressure):.12g}")
+    print(f"  Free variables: {', '.join(free_names)}")
+    print(f"  Max perturbed beta_toroidal: {max_perturbed_beta:.12g}")
+    print(f"  Optimum beta_toroidal: {beta:.12g}")
 
     failures = [name for name, passed in checks.items() if not passed]
     if failures:
@@ -467,10 +457,7 @@ def run_unit_tests(
     print("  All unit checks passed.")
 
     return {
-        "gradient_norm": gradient_norm,
-        "full_hessian_eigenvalues": all_hessian_eigenvalues,
-        "free_hessian_eigenvalues": reduced_eigenvalues,
-        "max_perturbed_pressure": max_perturbed_pressure,
+        "max_perturbed_beta_toroidal": max_perturbed_beta,
         "checks": checks,
     }
 
@@ -567,6 +554,7 @@ def main(argv=None):
     bounds = (tuple(args.epsilon_bounds), tuple(args.kappa_bounds), tuple(args.delta_bounds))
     result = optimize_shape_bayesian(
         bounds=bounds,
+        A=args.A,
         n_calls=args.n_calls,
         n_initial_points=args.n_initial_points,
         random_state=args.random_state,
@@ -577,11 +565,9 @@ def main(argv=None):
     optimizer = result["optimizer"]
 
     print(f"Initial shape: {_format_shape(result['initial_shape'])}")
-    print(f"Initial pressure: {float(result['initial_pressure']):.12g}")
+    print(f"Initial beta_toroidal: {float(result['initial_beta_toroidal']):.12g}")
     print(f"Final shape: {_format_shape(result['shape'])}")
-    print(f"Final pressure: {float(result['pressure']):.12g}")
-    if "gradient_norm" in result:
-        print(f"Gradient norm: {float(result['gradient_norm']):.12g}")
+    print(f"Final beta_toroidal: {float(result['beta_toroidal']):.12g}")
     print(f"Bayesian calls: {result.get('calls', 'unknown')}, initial points: {result.get('initial_points', 'unknown')}")
     if hasattr(optimizer, "status"):
         print(f"Optimizer status: {int(optimizer.status)}")
