@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'ITER_Equilibri
 sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
-from pressure_utils import make_psi, poloidal_circum
+from pressure_utils import make_psi, extract_zero_contour, poloidal_circum
 
 EPS, KAP, DLT = 0.5, 1.0, 0.0
 EXACT = 2 * np.pi * EPS          # pi
@@ -26,6 +26,7 @@ print(f"{'N':>6}  {'circumference':>16}  {'error':>12}  {'rel. error':>12}")
 print('-' * 52)
 
 for N in [100, 200, 500, 1000, 2000]:
-    C = poloidal_circum(psi, x_lim=(0.4, 1.6), y_lim=(-0.6, 0.6), N=N)
+    xs, ys = extract_zero_contour(psi, x_lim=(0.4, 1.6), y_lim=(-0.6, 0.6), n=N)
+    C = poloidal_circum(xs, ys)
     err = abs(C - EXACT)
     print(f"{N:>6}  {C:>16.10f}  {err:>12.2e}  {err/EXACT:>12.2e}")

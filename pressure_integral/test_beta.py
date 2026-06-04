@@ -40,7 +40,7 @@ print("=" * 60)
 
 # ── 1. circumference ──────────────────────────────────────────────
 exact_circum = 2 * np.pi * EPS
-num_circum   = poloidal_circum(psi, X_LIM, Y_LIM, N=N)
+num_circum   = poloidal_circum(xs, ys)
 print(f"\n1. Circumference")
 print(f"   exact   = {exact_circum:.10f}  (2*pi*eps)")
 print(f"   numeric = {num_circum:.10f}  err={abs(num_circum-exact_circum):.2e}")

@@ -168,9 +168,6 @@ def int_contour_boundary(G, xs, ys):
     Compute  ∬_Ω f(x,y) dxdy  via Green's theorem using a piecewise-linear
     zero contour as the boundary, with the midpoint rule on each edge.
 
-    Compute  ∬_Ω f(x,y) dxdy  via Green's theorem using a piecewise-linear
-    zero contour as the boundary, with the midpoint rule on each edge.
-
         ∬_Ω f dxdy  =  -∮_∂Ω G(x,y) dx
                      ≈  -∑_i  G(x_mid_i, y_mid_i) · Δx_i
 
@@ -227,20 +224,12 @@ def get_vol_av_p_from_params(epsilon, kappa, delta, A: float = -0.5, method: str
         N = kwargs.get('N',500)
         if N <= 0 or not isinstance(N, int):
             raise ValueError("Grid resolution N must be a positive integer for masking method.")
-        return int_masking(epsilon,kappa,delta,A, N)  # TODO: implement masking method
+        return int_masking(psi, epsilon, kappa, A, N)
     else:
         raise ValueError(f"Unknown method: {method}")
 
 
-def int_masking(epsilon,kappa,delta,A, N):
-  mu0 = 4 * np.pi * 1e-7
-  R0 = 1.0
-  psi0 = 1.0
-
-  psi, _, _ = make_psi(epsilon, kappa, delta, A)
-
-
-
+def int_masking(psi, epsilon, kappa, A, N):
   x = np.linspace(1 - epsilon, 1 + epsilon, N)
   y = np.linspace(-kappa * epsilon, kappa * epsilon, N)
 
@@ -270,25 +259,24 @@ def int_masking(epsilon,kappa,delta,A, N):
   return p_avg
 
 
-def poloidal_circum(psi, x_lim: tuple, y_lim: tuple, N: int = 500) -> float:
+def poloidal_circum(xs, ys) -> float:
     """
-    Approximate the poloidal circumference of the zero contour of psi.
+    Approximate the poloidal circumference of a closed polygon.
 
-    Extracts the zero contour as a closed polygon via extract_zero_contour,
-    then sums the Euclidean lengths of all edges.
+    Sums the Euclidean lengths of all edges of the polygon, which should be
+    the zero contour of psi obtained from extract_zero_contour.
 
     Parameters
     ----------
-    psi   : callable(x, y) -> ndarray  – poloidal flux function
-    x_lim : (x_min, x_max)             – grid extent passed to extract_zero_contour
-    y_lim : (y_min, y_max)             – grid extent passed to extract_zero_contour
-    N     : int                        – marching-squares grid resolution (default 500)
+    xs : array-like, shape (N+1,)  – x-coordinates of closed polygon vertices
+    ys : array-like, shape (N+1,)  – y-coordinates of closed polygon vertices
 
     Returns
     -------
     circumference : float
     """
-    xs, ys = extract_zero_contour(psi, x_lim, y_lim, n=N)
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
 
     dx = xs[1:] - xs[:-1]
     dy = ys[1:] - ys[:-1]
@@ -328,7 +316,16 @@ def integral_multiplier(epsilon: float, kappa: float, delta: float,
     return int_contour_boundary(G, xs, ys)
 
 
-def beta_poloidal(epsilon, kappa, delta, A=-0.5, N=500):
+def beta_poloidal(epsilon, kappa=None, delta=None, A=-0.5, N=500):
+    arr = np.asarray(epsilon, dtype=float)
+    if arr.ndim == 2 and arr.shape[1] == 3:
+        epsilon, kappa, delta = arr[:, 0], arr[:, 1], arr[:, 2]
+    elif kappa is None or delta is None:
+        raise ValueError("kappa and delta are required when epsilon is not an Nx3 array")
+
+    if np.ndim(epsilon) > 0 or np.ndim(kappa) > 0 or np.ndim(delta) > 0:
+        _scalar = lambda e, k, d: beta_poloidal(e, k, d, A, N)
+        return np.vectorize(_scalar)(epsilon, kappa, delta)
 
     psi, c, _ = make_psi(epsilon, kappa, delta, A)
 
@@ -337,7 +334,7 @@ def beta_poloidal(epsilon, kappa, delta, A=-0.5, N=500):
 
     xs, ys = extract_zero_contour(psi, x_lim, y_lim, n=N)
 
-    circum       = poloidal_circum(psi, x_lim, y_lim, N=N)
+    circum       = poloidal_circum(xs, ys)
     volume       = int_contour_boundary(lambda x, y: x * y, xs, ys)
     psi_integral = int_contour_boundary(lambda x, y: G_total(x, y, A, c), xs, ys)
     factor       = int_contour_boundary(lambda x, y: y * (A / x + (1 - A) * x), xs, ys)
@@ -346,13 +343,19 @@ def beta_poloidal(epsilon, kappa, delta, A=-0.5, N=500):
 
     return beta_p
 
-def beta_toroidal(epsilon,kappa,delta,A=-0.5,q = 2,N=500):
+def beta_toroidal(epsilon, kappa=None, delta=None, A=-0.5, q=2, N=500):
+    arr = np.asarray(epsilon, dtype=float)
+    if arr.ndim == 2 and arr.shape[1] == 3:
+        epsilon, kappa, delta = arr[:, 0], arr[:, 1], arr[:, 2]
+    elif kappa is None or delta is None:
+        raise ValueError("kappa and delta are required when epsilon is not an Nx3 array")
 
-    beta_p = beta_poloidal(epsilon,kappa,delta,A,N)
+    if np.ndim(epsilon) > 0 or np.ndim(kappa) > 0 or np.ndim(delta) > 0:
+        _scalar = lambda e, k, d: beta_toroidal(e, k, d, A, q, N)
+        return np.vectorize(_scalar)(epsilon, kappa, delta)
 
-    beta_t = epsilon**2*beta_p/q**2
-
-    return beta_t
+    beta_p = beta_poloidal(epsilon, kappa, delta, A, N)
+    return epsilon**2 * beta_p / q**2
 
 
 

@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'ITER_Equilibri
 sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
-from pressure_utils import get_vol_av_p_from_params
+from pressure_utils import get_vol_av_p_from_params, beta_poloidal, beta_toroidal
 
 # ── scalar baseline ───────────────────────────────────────────────────────────
 eps0, kap0, dlt0 = 0.32, 1.7, 0.33
@@ -54,3 +54,27 @@ print("          ", "  ".join(f"eps={e:.2f}" for e in eps_grid))
 for i, d in enumerate(dlt_grid):
     row = "  ".join(f"{result2d[i,j]:.6f}" for j in range(len(eps_grid)))
     print(f"  dlt={d:+.2f}  {row}")
+
+# ── beta_poloidal: Nx3 array ──────────────────────────────────────────────────
+params = np.array([
+    [0.2,  1.2, 0.1 ],
+    [0.32, 1.7, 0.33],
+    [0.5,  2.0, 0.5 ],
+])
+
+scalar_bp = np.array([beta_poloidal(e, k, d) for e, k, d in params])
+result_bp = beta_poloidal(params)
+
+print(f"\nbeta_poloidal Nx3 array (n={len(params)}):")
+for i, (e, k, d) in enumerate(params):
+    match = " ✓" if abs(result_bp[i] - scalar_bp[i]) < 1e-10 else " ✗"
+    print(f"  eps={e:.2f}  kap={k:.1f}  dlt={d:.2f}  →  {result_bp[i]:.8f}{match}")
+
+# ── beta_toroidal: Nx3 array ──────────────────────────────────────────────────
+scalar_bt = np.array([beta_toroidal(e, k, d) for e, k, d in params])
+result_bt = beta_toroidal(params)
+
+print(f"\nbeta_toroidal Nx3 array (n={len(params)}):")
+for i, (e, k, d) in enumerate(params):
+    match = " ✓" if abs(result_bt[i] - scalar_bt[i]) < 1e-10 else " ✗"
+    print(f"  eps={e:.2f}  kap={k:.1f}  dlt={d:.2f}  →  {result_bt[i]:.8f}{match}")
