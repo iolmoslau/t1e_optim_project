@@ -163,63 +163,13 @@ def extract_zero_contour(psi, x_lim, y_lim, n=500):
     return xs, ys
 
 
-def int_parametric_boundary(G, epsilon, kappa, delta, h):
-    """
-    Compute  ∬_Ω f(x,y) dxdy  via Green's theorem as a boundary line integral,
-    where G is the y-antiderivative of f:  ∂G/∂y = f.
-
-    By Green's theorem with a counterclockwise boundary (choosing P=-G, Q=0):
-
-        ∬_Ω f dxdy  =  -∮_∂Ω G(x,y) dx
-                     =  -∫_0^{2π} G(x(θ), y(θ)) · (dx/dθ) dθ
-
-    The boundary ∂Ω is the Solovev parametric curve
-
-        x(θ) = 1 + ε·cos(θ + arcsin(δ)·sin(θ))
-        y(θ) = ε·κ·sin(θ),   θ ∈ [0, 2π]
-
-    The integral over θ is approximated with the midpoint rule at step size h.
-
-    Parameters
-    ----------
-    G       : callable(x, y) -> ndarray  – y-antiderivative of f, i.e. ∂G/∂y = f
-    epsilon : float  – inverse aspect ratio
-    kappa   : float  – elongation
-    delta   : float  – triangularity
-    h       : float  – step size in θ for the midpoint rule
-
-    Returns
-    -------
-    integral : float
-
-    Example
-    -------
-    from psi_anti_deriv_exact import G_total
-    psi, c, A = make_psi(epsilon, kappa, delta)
-    G = lambda x, y: G_total(x, y, A, c)
-    result = int_parametric_boundary(G, epsilon, kappa, delta, h=0.01)
-    """
-    alpha = np.arcsin(delta)
-
-    N = max(1, int(np.ceil(2.0 * np.pi / h)))
-    dtheta = 2.0 * np.pi / N
-    theta = (np.arange(N) + 0.5) * dtheta   # midpoints
-
-    x = 1.0 + epsilon * np.cos(theta + alpha * np.sin(theta))
-    y = epsilon * kappa * np.sin(theta)
-    dxdtheta = -epsilon * np.sin(theta + alpha * np.sin(theta)) * (1.0 + alpha * np.cos(theta))
-
-    return -float(np.sum(G(x, y) * dxdtheta) * dtheta)
-
-
 def int_contour_boundary(G, xs, ys):
     """
     Compute  ∬_Ω f(x,y) dxdy  via Green's theorem using a piecewise-linear
     zero contour as the boundary, with the midpoint rule on each edge.
 
-    Identical in principle to int_parametric_boundary but the boundary is
-    supplied as a closed polygon (e.g. from extract_zero_contour) rather than
-    the analytic parametric curve.
+    Compute  ∬_Ω f(x,y) dxdy  via Green's theorem using a piecewise-linear
+    zero contour as the boundary, with the midpoint rule on each edge.
 
         ∬_Ω f dxdy  =  -∮_∂Ω G(x,y) dx
                      ≈  -∑_i  G(x_mid_i, y_mid_i) · Δx_i
@@ -265,15 +215,7 @@ def get_vol_av_p_from_params(epsilon, kappa, delta, A: float = -0.5, method: str
     G = lambda x, y: G_total(x, y, A, c)
 
     func_for_vol = lambda x,y: x*y
-    if method == 'parametric':
-        h = kwargs.get('h',0.1)
-        if h <= 0:
-            raise ValueError("Step size h must be non zero and positive for parametric method.")
-        num = int_parametric_boundary(G,epsilon,kappa,delta,h=h)
-        denom = int_parametric_boundary(func_for_vol,epsilon,kappa,delta,h=h)
-
-        return -(1-A)*num/denom
-    elif method == 'contour':
+    if method == 'contour':
         N = kwargs.get('N',500)
         if N <=0 or not isinstance(N, int):
             raise ValueError("Grid resolution N must be a positive integer for contour method.")
