@@ -1,5 +1,17 @@
 # Python bytecode
 __pycache__/
 *.py[cod]
-results.csv
 .vscode
+uv.lock
+pyproject.toml
+
+# MacOs
+.DS_Store
+
+# Output
+*.png
+*.csv
+
+
+
+
