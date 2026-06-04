@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'ITER_Equilibri
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'pressure_integral'))
 
 import numpy as np
-from pressure_utils import get_vol_av_p_from_params
+from pressure_utils import get_vol_av_p_from_params, beta_toroidal
 
 
 
@@ -35,32 +35,39 @@ def initialize_population(N: int, epsilon_range: tuple, kappa_range: tuple, delt
 
 
 def evaluate_population(params: np.ndarray, A: float = -0.5,
+                         objective: str = 'pressure',
                          method: str = 'contour', **kwargs) -> np.ndarray:
     """
-    Evaluate the volume-averaged pressure for a population of parameter sets.
+    Evaluate a fitness objective for a population of parameter sets.
 
     Parameters
     ----------
-    params : ndarray, shape (N, 3)
+    params    : ndarray, shape (N, 3)
         Each row is [epsilon, kappa, delta] for one individual.
-    A      : float  – Solov'ev profile parameter (default -0.5)
-    method : str    – 'parametric' or 'contour' (passed to get_vol_av_p_from_params)
-    **kwargs        – forwarded to get_vol_av_p_from_params (e.g. h=0.01)
+    A         : float  – Solov'ev profile parameter (default -0.5)
+    objective : str    – 'pressure' uses get_vol_av_p_from_params;
+                         'beta' uses beta_toroidal
+    method    : str    – 'contour' or 'masking' (only used when objective='pressure')
+    **kwargs           – forwarded to the objective function (e.g. N=500, q=2)
 
     Returns
     -------
-    pressures : ndarray, shape (N,)
+    fitnesses : ndarray, shape (N,)
     """
     params = np.asarray(params, dtype=float)
     if params.ndim != 2 or params.shape[1] != 3:
         raise ValueError(f"params must be shape (N, 3), got {params.shape}")
 
-    epsilon = params[:, 0]
-    kappa   = params[:, 1]
-    delta   = params[:, 2]
-
-    return np.asarray(get_vol_av_p_from_params(epsilon, kappa, delta, A=A,
-                                               method=method, **kwargs))
+    if objective == 'pressure':
+        epsilon = params[:, 0]
+        kappa   = params[:, 1]
+        delta   = params[:, 2]
+        return np.asarray(get_vol_av_p_from_params(epsilon, kappa, delta, A=A,
+                                                   method=method, **kwargs))
+    elif objective == 'beta':
+        return np.asarray(beta_toroidal(params, A=A, **kwargs))
+    else:
+        raise ValueError(f"Unknown objective: '{objective}'. Choose 'pressure' or 'beta'.")
 
 
 def select_parents(params: np.ndarray, fitnesses: np.ndarray,
