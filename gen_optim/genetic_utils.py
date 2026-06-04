@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'ITER_Equilibri
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'pressure_integral'))
 
 import numpy as np
-from pressure_utils import get_vol_av_p_from_params, beta_toroidal
+from pressure_utils import get_vol_av_p_from_params, beta_toroidal, _normalized_psi_pressure
 
 
 
@@ -46,8 +46,10 @@ def evaluate_population(params: np.ndarray, A: float = -0.5,
         Each row is [epsilon, kappa, delta] for one individual.
     A         : float  – Solov'ev profile parameter (default -0.5)
     objective : str    – 'pressure' uses get_vol_av_p_from_params;
-                         'beta' uses beta_toroidal
-    method    : str    – 'contour' or 'masking' (only used when objective='pressure')
+                         'beta' uses beta_toroidal;
+                         'normalized_psi' uses _normalized_psi_pressure
+    method    : str    – 'contour' or 'masking' (only used when objective='pressure'
+                         or 'normalized_psi')
     **kwargs           – forwarded to the objective function (e.g. N=500, q=2)
 
     Returns
@@ -66,8 +68,15 @@ def evaluate_population(params: np.ndarray, A: float = -0.5,
                                                    method=method, **kwargs))
     elif objective == 'beta':
         return np.asarray(beta_toroidal(params, A=A, **kwargs))
+    elif objective == 'normalized_psi':
+        epsilon = params[:, 0]
+        kappa   = params[:, 1]
+        delta   = params[:, 2]
+        return np.asarray(_normalized_psi_pressure(epsilon, kappa, delta, A=A,
+                                                   method=method, **kwargs))
     else:
-        raise ValueError(f"Unknown objective: '{objective}'. Choose 'pressure' or 'beta'.")
+        raise ValueError(f"Unknown objective: '{objective}'. "
+                         "Choose 'pressure', 'beta', or 'normalized_psi'.")
 
 
 def select_parents(params: np.ndarray, fitnesses: np.ndarray,
