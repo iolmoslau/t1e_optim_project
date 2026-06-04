@@ -278,7 +278,7 @@ def _normalized_psi_pressure(epsilon, kappa, delta, A: float = -0.5,
         G_norm = lambda x, y: G_total(x, y, A, c) / abs_psi_min
         num   = int_contour_boundary(G_norm, xs, ys)
         denom = int_contour_boundary(func_for_vol, xs, ys)
-        return -(1 - A) * num / denom
+        return  num / denom
 
     elif method == 'masking':
         x = np.linspace(1 - epsilon, 1 + epsilon, N)
@@ -293,7 +293,7 @@ def _normalized_psi_pressure(epsilon, kappa, delta, A: float = -0.5,
         abs_psi_min = abs(float(np.min(interior)))
 
         dA = (x[1] - x[0]) * (y[1] - y[0])
-        P_norm = -(1 - A) * PSI / abs_psi_min
+        P_norm = PSI / abs_psi_min
         return float(dA * np.sum(X * P_norm * indicator) /
                      (dA * np.sum(X * indicator)))
 
