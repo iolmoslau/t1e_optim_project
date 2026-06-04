@@ -26,7 +26,7 @@ from pressure_integral.pressure_utils import get_vol_av_p_from_params
 GradientBoostingQuantileRegressor.__sklearn_tags__ = lambda self: default_tags(self)
 
 
-DEFAULT_A = -0.05
+DEFAULT_A = -0.1
 DEFAULT_BOUNDS = ((0.1, 0.45), (1, 1.7), (-0.3, 0.3))  # epsilon,kappa,delta
 
 
