@@ -40,6 +40,12 @@ GradientBoostingQuantileRegressor.__sklearn_tags__ = lambda self: default_tags(s
 
 DEFAULT_A = -0.1
 DEFAULT_BOUNDS = ((0.1, 0.45), (1, 1.7), (-0.3, 0.3))  # epsilon,kappa,delta
+PARAM_NAMES = ("epsilon", "kappa", "delta")
+PARAM_LABELS = {
+    "epsilon": r"$\epsilon$",
+    "kappa": r"$\kappa$",
+    "delta": r"$\delta$",
+}
 
 
 def basis_values(x, y):
@@ -285,12 +291,17 @@ def negative_beta_np(shape, A=DEFAULT_A, n_quad=2048):
     return -objective_np(shape, A=A, n_quad=n_quad)
 
 
-def _build_bo_space(bounds):
+def _build_bo_space(bounds, free_indices=None):
     """Build scikit-optimize search space from bounds.
 
     `bounds` should be an iterable of (low, high) pairs for epsilon,kappa,delta.
     """
-    return [Real(lo, hi, name=name) for (lo, hi), name in zip(bounds, ("epsilon", "kappa", "delta"))]
+    if free_indices is None:
+        free_indices = range(len(PARAM_NAMES))
+    return [
+        Real(bounds[i][0], bounds[i][1], name=PARAM_NAMES[i])
+        for i in free_indices
+    ]
 
 
 def _validate_bounds(bounds):
@@ -307,9 +318,64 @@ def _validate_bounds(bounds):
     return parsed
 
 
+def _normalize_fixed_values(fixed_values=None, bounds=DEFAULT_BOUNDS):
+    bounds = _validate_bounds(bounds)
+    if fixed_values is None:
+        fixed_values = (None, None, None)
+    elif isinstance(fixed_values, dict):
+        fixed_values = tuple(fixed_values.get(name) for name in PARAM_NAMES)
+    else:
+        fixed_values = tuple(fixed_values)
+
+    if len(fixed_values) != len(PARAM_NAMES):
+        raise ValueError("fixed_values must contain epsilon, kappa, and delta")
+
+    normalized = []
+    for value, (lo, hi), name in zip(fixed_values, bounds, PARAM_NAMES):
+        if value is None:
+            normalized.append(None)
+            continue
+        value = float(value)
+        if value < lo or value > hi:
+            raise ValueError(f"fixed {name}={value:g} is outside bounds [{lo:g}, {hi:g}]")
+        normalized.append(value)
+    return tuple(normalized)
+
+
+def _fixed_and_free_indices(fixed_values):
+    fixed_indices = tuple(i for i, value in enumerate(fixed_values) if value is not None)
+    free_indices = tuple(i for i, value in enumerate(fixed_values) if value is None)
+    return fixed_indices, free_indices
+
+
+def _shape_from_free_values(free_values, fixed_values):
+    free_values = tuple(float(value) for value in free_values)
+    _, free_indices = _fixed_and_free_indices(fixed_values)
+    if len(free_values) != len(free_indices):
+        raise ValueError("candidate dimension does not match the free parameter count")
+
+    shape = [None, None, None]
+    for i, value in enumerate(fixed_values):
+        if value is not None:
+            shape[i] = float(value)
+    for i, value in zip(free_indices, free_values):
+        shape[i] = float(value)
+    return tuple(shape)
+
+
+def _format_fixed_values(fixed_values):
+    fixed_items = [
+        f"{PARAM_NAMES[i]}={value:.12g}"
+        for i, value in enumerate(fixed_values)
+        if value is not None
+    ]
+    return ", ".join(fixed_items) if fixed_items else "none"
+
+
 def optimize_shape_bayesian(
     bounds=DEFAULT_BOUNDS,
     A=DEFAULT_A,
+    fixed_values=None,
     n_calls=50,
     n_initial_points=10,
     random_state=0,
@@ -317,13 +383,23 @@ def optimize_shape_bayesian(
     surrogate="gp",
 ):
     bounds = _validate_bounds(bounds)
+    fixed_values = _normalize_fixed_values(fixed_values, bounds)
+    fixed_indices, free_indices = _fixed_and_free_indices(fixed_values)
+    if len(fixed_indices) > 1:
+        raise ValueError("fix at most one of epsilon, kappa, or delta for this 2D contour workflow")
+    if not free_indices:
+        raise ValueError("at least one parameter must be free for Bayesian optimization")
     if int(n_initial_points) >= int(n_calls):
         raise ValueError("n_initial_points must be smaller than n_calls")
 
     # Build search space and run BO using the requested surrogate model.
     # The objective is negated because the optimizer expects lower-is-better.
-    search_space = _build_bo_space(bounds)
-    objective = lambda x: negative_beta_np(x, A=A, n_quad=n_quad)
+    search_space = _build_bo_space(bounds, free_indices)
+    objective = lambda x: negative_beta_np(
+        _shape_from_free_values(x, fixed_values),
+        A=A,
+        n_quad=n_quad,
+    )
     surrogate = str(surrogate).lower()
 
     if surrogate == "gp":
@@ -370,13 +446,18 @@ def optimize_shape_bayesian(
             % surrogate
         )
 
-    best_shape = tuple(bo_result.x)
+    best_shape = _shape_from_free_values(bo_result.x, fixed_values)
     best_beta = objective_np(best_shape, A=A, n_quad=n_quad)
     coefficients = solve_coefficients(*best_shape, A=A)
     raw = unconstrained_from_bounded(jnp.asarray(best_shape), bounds)
+    shape_iters = [
+        _shape_from_free_values(candidate, fixed_values)
+        for candidate in bo_result.x_iters
+    ]
+    best_call = int(np.argmin(np.asarray(bo_result.func_vals))) + 1
 
-    if bo_result.x_iters:
-        first_shape = tuple(bo_result.x_iters[0])
+    if shape_iters:
+        first_shape = shape_iters[0]
         first_beta = objective_np(first_shape, A=A, n_quad=n_quad)
     else:
         first_shape = best_shape
@@ -395,8 +476,13 @@ def optimize_shape_bayesian(
         "initial_points": int(n_initial_points),
         "best_raw": bo_result.x,
         "best_fun": bo_result.fun,
+        "best_call": best_call,
         "x_iters": bo_result.x_iters,
+        "shape_iters": shape_iters,
         "func_vals": bo_result.func_vals,
+        "fixed_values": fixed_values,
+        "fixed_indices": fixed_indices,
+        "free_indices": free_indices,
     }
 
 
@@ -422,15 +508,18 @@ def run_unit_tests(
 
     shape = np.asarray(result["shape"], dtype=float)
     beta = float(result["beta_toroidal"])
+    fixed_values = result.get("fixed_values", (None, None, None))
+    fixed_mask = np.asarray([value is not None for value in fixed_values], dtype=bool)
 
     lower_active = shape <= low + active_bound_tol
     upper_active = shape >= high - active_bound_tol
     free_indices = [
-        i for i, is_free in enumerate(~(lower_active | upper_active)) if is_free
+        i for i, is_free in enumerate(~(lower_active | upper_active | fixed_mask)) if is_free
     ]
 
     rng = np.random.default_rng(int(perturbation_seed))
     directions = rng.normal(size=(int(perturbation_samples), 3))
+    directions[:, fixed_mask] = 0.0
     directions = np.where(upper_active, -np.abs(directions), directions)
     directions = np.where(lower_active, np.abs(directions), directions)
     directions /= np.linalg.norm(directions, axis=1, keepdims=True)
@@ -617,6 +706,160 @@ def plot_flux_contours(
     return fig
 
 
+def _trajectory_sample_indices(count, every):
+    if count <= 0:
+        return []
+    every = max(1, int(every))
+    indices = [0]
+    indices.extend(range(every - 1, count, every))
+    if count - 1 not in indices:
+        indices.append(count - 1)
+    return sorted(set(indices))
+
+
+def plot_fixed_parameter_objective_contours(
+    result,
+    A=DEFAULT_A,
+    bounds=DEFAULT_BOUNDS,
+    fixed_values=None,
+    output_path=None,
+    grid_size=35,
+    contour_count=20,
+    trajectory_every=5,
+    n_quad=500,
+    show=False,
+):
+    """Plot a 2D beta_toroidal landscape and BO trajectory when one parameter is fixed."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    bounds = _validate_bounds(bounds)
+    fixed_values = result.get("fixed_values", fixed_values)
+    fixed_values = _normalize_fixed_values(fixed_values, bounds)
+    fixed_indices, free_indices = _fixed_and_free_indices(fixed_values)
+
+    if len(fixed_indices) != 1 or len(free_indices) != 2:
+        raise ValueError("objective contour trajectory plots require exactly one fixed parameter")
+
+    grid_size = int(grid_size)
+    contour_count = int(contour_count)
+    trajectory_every = int(trajectory_every)
+    if grid_size < 2:
+        raise ValueError("objective contour grid size must be at least 2")
+    if contour_count < 2:
+        raise ValueError("objective contour count must be at least 2")
+    if trajectory_every < 1:
+        raise ValueError("trajectory_every must be positive")
+
+    fixed_index = fixed_indices[0]
+    x_index, y_index = free_indices
+    fixed_name = PARAM_NAMES[fixed_index]
+    x_name = PARAM_NAMES[x_index]
+    y_name = PARAM_NAMES[y_index]
+    fixed_value = fixed_values[fixed_index]
+
+    x_values = np.linspace(bounds[x_index][0], bounds[x_index][1], grid_size)
+    y_values = np.linspace(bounds[y_index][0], bounds[y_index][1], grid_size)
+    X, Y = np.meshgrid(x_values, y_values)
+    Z = np.full_like(X, np.nan, dtype=float)
+
+    for row, y_value in enumerate(y_values):
+        for col, x_value in enumerate(x_values):
+            shape = [None, None, None]
+            shape[fixed_index] = fixed_value
+            shape[x_index] = float(x_value)
+            shape[y_index] = float(y_value)
+            try:
+                Z[row, col] = objective_np(tuple(shape), A=A, n_quad=n_quad)
+            except Exception:
+                Z[row, col] = np.nan
+
+    fig, ax = plt.subplots(figsize=(7.5, 5.8), constrained_layout=True)
+    finite_values = Z[np.isfinite(Z)]
+    if finite_values.size:
+        filled = ax.contourf(X, Y, Z, levels=contour_count, cmap="viridis")
+        ax.contour(X, Y, Z, levels=contour_count, colors="black", linewidths=0.35, alpha=0.45)
+        fig.colorbar(filled, ax=ax, label="beta_toroidal")
+    else:
+        ax.text(0.5, 0.5, "No finite objective values", transform=ax.transAxes, ha="center", va="center")
+
+    shape_iters = np.asarray(result.get("shape_iters", []), dtype=float)
+    if shape_iters.size:
+        selected_indices = _trajectory_sample_indices(len(shape_iters), trajectory_every)
+        selected = shape_iters[selected_indices]
+        ax.plot(
+            selected[:, x_index],
+            selected[:, y_index],
+            color="white",
+            linewidth=2.0,
+            marker="o",
+            markersize=4.5,
+            markeredgecolor="black",
+            markerfacecolor="white",
+            label=f"BO trajectory every {trajectory_every} calls",
+        )
+        ax.scatter(
+            shape_iters[0, x_index],
+            shape_iters[0, y_index],
+            color="#f59e0b",
+            edgecolor="black",
+            s=65,
+            marker="s",
+            label="first call",
+            zorder=4,
+        )
+        for call_index, point in zip(selected_indices, selected):
+            if len(selected_indices) <= 25:
+                ax.annotate(
+                    str(call_index + 1),
+                    (point[x_index], point[y_index]),
+                    textcoords="offset points",
+                    xytext=(4, 4),
+                    fontsize=8,
+                    color="black",
+                )
+
+    final_shape = np.asarray(result["shape"], dtype=float)
+    best_call = result.get("best_call")
+    ax.scatter(
+        final_shape[x_index],
+        final_shape[y_index],
+        color="#ef4444",
+        edgecolor="black",
+        s=95,
+        marker="*",
+        label=f"final best (call {best_call})" if best_call is not None else "final best",
+        zorder=5,
+    )
+    if best_call is not None:
+        ax.annotate(
+            f"best call = {best_call}",
+            (final_shape[x_index], final_shape[y_index]),
+            textcoords="offset points",
+            xytext=(8, 8),
+            fontsize=9,
+            color="black",
+            weight="bold",
+        )
+
+    ax.set_xlabel(PARAM_LABELS[x_name])
+    ax.set_ylabel(PARAM_LABELS[y_name])
+    ax.set_xlim(bounds[x_index][0], bounds[x_index][1])
+    ax.set_ylim(bounds[y_index][0], bounds[y_index][1])
+    ax.set_title(f"beta_toroidal, fixed {fixed_name}={fixed_value:.4g}")
+    ax.legend(loc="best", fontsize=8)
+
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200)
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return fig
+
+
 def _format_shape(shape):
     epsilon, kappa, delta = [float(v) for v in shape]
     return f"epsilon={epsilon:.12g}, kappa={kappa:.12g}, delta={delta:.12g}"
@@ -625,6 +868,9 @@ def _format_shape(shape):
 def _build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--A", type=float, default=DEFAULT_A)
+    parser.add_argument("--fix-epsilon", type=float, help="fix epsilon and optimize kappa,delta")
+    parser.add_argument("--fix-kappa", type=float, help="fix kappa and optimize epsilon,delta")
+    parser.add_argument("--fix-delta", type=float, help="fix delta and optimize epsilon,kappa")
     parser.add_argument("--epsilon-bounds", nargs=2, type=float, default=DEFAULT_BOUNDS[0], metavar=("LOW", "HIGH"))
     parser.add_argument("--kappa-bounds", nargs=2, type=float, default=DEFAULT_BOUNDS[1], metavar=("LOW", "HIGH"))
     parser.add_argument("--delta-bounds", nargs=2, type=float, default=DEFAULT_BOUNDS[2], metavar=("LOW", "HIGH"))
@@ -644,6 +890,11 @@ def _build_parser():
     parser.add_argument("--plot", type=Path, help="save optimized flux contours to this path")
     parser.add_argument("--plot-grid", type=int, default=600)
     parser.add_argument("--contour-count", type=int, default=20)
+    parser.add_argument("--objective-plot", type=Path, help="save fixed-parameter objective contour trajectory plot to this path")
+    parser.add_argument("--objective-plot-grid", type=int, default=35)
+    parser.add_argument("--objective-contour-count", type=int, default=20)
+    parser.add_argument("--objective-plot-n-quad", type=int, help="N used for the objective contour grid; defaults to --n-quad")
+    parser.add_argument("--trajectory-every", type=int, default=5)
     parser.add_argument("--show-plot", action="store_true", default=True, help="show plot on completion (default: True)")
     parser.add_argument("--no-show-plot", action="store_true", help="do not show plot (overrides --show-plot)")
     parser.add_argument("--gradient-step", type=float, default=1e-3, help="finite-difference step for final gradient diagnostics")
@@ -656,11 +907,20 @@ def _build_parser():
 
 
 def main(argv=None):
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
     bounds = (tuple(args.epsilon_bounds), tuple(args.kappa_bounds), tuple(args.delta_bounds))
+    fixed_values = (args.fix_epsilon, args.fix_kappa, args.fix_delta)
+    fixed_count = sum(value is not None for value in fixed_values)
+    if fixed_count > 1:
+        parser.error("fix at most one of --fix-epsilon, --fix-kappa, or --fix-delta")
+    if args.objective_plot and fixed_count != 1:
+        parser.error("--objective-plot requires exactly one fixed parameter")
+
     result = optimize_shape_bayesian(
         bounds=bounds,
         A=args.A,
+        fixed_values=fixed_values,
         n_calls=args.n_calls,
         n_initial_points=args.n_initial_points,
         random_state=args.random_state,
@@ -669,11 +929,19 @@ def main(argv=None):
     )
 
     optimizer = result["optimizer"]
+    show_flag = bool(args.show_plot)
+    if getattr(args, "no_show_plot", False):
+        show_flag = False
 
+    if result["fixed_indices"]:
+        optimized_names = ", ".join(PARAM_NAMES[i] for i in result["free_indices"])
+        print(f"Fixed parameter: {_format_fixed_values(result['fixed_values'])}")
+        print(f"Optimized parameters: {optimized_names}")
     print(f"Initial shape: {_format_shape(result['initial_shape'])}")
     print(f"Initial beta_toroidal: {float(result['initial_beta_toroidal']):.12g}")
     print(f"Final shape: {_format_shape(result['shape'])}")
     print(f"Final beta_toroidal: {float(result['beta_toroidal']):.12g}")
+    print(f"Best call: {result.get('best_call', 'unknown')}")
     print(f"Bayesian calls: {result.get('calls', 'unknown')}, initial points: {result.get('initial_points', 'unknown')}")
     if hasattr(optimizer, "status"):
         print(f"Optimizer status: {int(optimizer.status)}")
@@ -697,10 +965,24 @@ def main(argv=None):
             perturbation_samples=args.test_perturbation_samples,
             perturbation_seed=args.test_seed,
         )
+    if result["fixed_indices"] and (args.objective_plot or show_flag):
+        objective_plot_n_quad = args.objective_plot_n_quad or args.n_quad
+        print("Computing fixed-parameter objective contour trajectory plot...")
+        plot_fixed_parameter_objective_contours(
+            result,
+            A=args.A,
+            bounds=bounds,
+            fixed_values=result["fixed_values"],
+            output_path=args.objective_plot,
+            grid_size=args.objective_plot_grid,
+            contour_count=args.objective_contour_count,
+            trajectory_every=args.trajectory_every,
+            n_quad=objective_plot_n_quad,
+            show=show_flag,
+        )
+        if args.objective_plot:
+            print(f"Saved objective contour trajectory plot: {args.objective_plot}")
     if args.plot or args.show_plot:
-        show_flag = bool(args.show_plot)
-        if getattr(args, "no_show_plot", False):
-            show_flag = False
         plot_flux_contours(
             result["shape"],
             coefficients=result["coefficients"],
