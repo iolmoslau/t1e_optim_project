@@ -229,11 +229,29 @@ def get_vol_av_p_from_params(epsilon, kappa, delta, A: float = -0.5, method: str
         raise ValueError(f"Unknown method: {method}")
 
 
-def _normalized_psi_pressure(epsilon, kappa, delta, A: float = -0.5,
+def _compute_psi_min(psi, epsilon, kappa, N=500):
+    """
+    Return the minimum (most negative) value of psi inside the zero contour.
+
+    Evaluates psi on an NxN grid over the plasma extent with 0.1 padding and
+    returns the minimum of all grid points where psi <= 0.
+    """
+    x_lim = (1 - epsilon - 0.1, 1 + epsilon + 0.1)
+    y_lim = (-kappa * epsilon - 0.1, kappa * epsilon + 0.1)
+    x_g = np.linspace(x_lim[0], x_lim[1], N)
+    y_g = np.linspace(y_lim[0], y_lim[1], N)
+    PSI_g = psi(*np.meshgrid(x_g, y_g))
+    interior = PSI_g[PSI_g <= 0]
+    if interior.size == 0:
+        raise ValueError("No interior points found; check domain bounds.")
+    return float(np.min(interior))
+
+
+def normalized_psi_pressure(epsilon, kappa, delta, A: float = -0.5,
                               method: str = 'contour', **kwargs):
     """
     Volume-averaged normalised pressure: same as get_vol_av_p_from_params but
-    integrates  psi / |psi_min|  instead of  psi, where psi_min is the minimum
+    integrates  psi / psi_min  instead of  psi, where psi_min is the minimum
     (most negative) value of psi inside the zero contour.
 
     Parameters
@@ -250,7 +268,7 @@ def _normalized_psi_pressure(epsilon, kappa, delta, A: float = -0.5,
     p_norm : float
     """
     if np.ndim(epsilon) > 0 or np.ndim(kappa) > 0 or np.ndim(delta) > 0:
-        _scalar = lambda e, k, d: _normalized_psi_pressure(e, k, d, A, method, **kwargs)
+        _scalar = lambda e, k, d: normalized_psi_pressure(e, k, d, A, method, **kwargs)
         return np.vectorize(_scalar)(epsilon, kappa, delta)
 
     psi, c, _ = make_psi(epsilon, kappa, delta, A)
@@ -264,21 +282,14 @@ def _normalized_psi_pressure(epsilon, kappa, delta, A: float = -0.5,
 
     func_for_vol = lambda x, y: x * y
 
-    if method == 'contour':
-        # Evaluate psi on grid to locate the interior minimum
-        x_g = np.linspace(x_lim[0], x_lim[1], N)
-        y_g = np.linspace(y_lim[0], y_lim[1], N)
-        PSI_g = psi(*np.meshgrid(x_g, y_g))
-        interior = PSI_g[PSI_g <= 0]
-        if interior.size == 0:
-            raise ValueError("No interior points found; check domain bounds.")
-        abs_psi_min = abs(float(np.min(interior)))
+    psi_min = _compute_psi_min(psi, epsilon, kappa, N=N)
 
+    if method == 'contour':
         xs, ys = extract_zero_contour(psi, x_lim, y_lim, n=N)
-        G_norm = lambda x, y: G_total(x, y, A, c) / abs_psi_min
+        G_norm = lambda x, y: G_total(x, y, A, c) / psi_min
         num   = int_contour_boundary(G_norm, xs, ys)
         denom = int_contour_boundary(func_for_vol, xs, ys)
-        return  num / denom
+        return num / denom
 
     elif method == 'masking':
         x = np.linspace(1 - epsilon, 1 + epsilon, N)
@@ -286,19 +297,52 @@ def _normalized_psi_pressure(epsilon, kappa, delta, A: float = -0.5,
         X, Y = np.meshgrid(x, y)
         PSI = psi(X, Y)
         indicator = (PSI <= 0).astype(float)
-
-        interior = PSI[PSI <= 0]
-        if interior.size == 0:
-            raise ValueError("No interior points found; check domain bounds.")
-        abs_psi_min = abs(float(np.min(interior)))
-
         dA = (x[1] - x[0]) * (y[1] - y[0])
-        P_norm = PSI / abs_psi_min
+        P_norm = PSI / psi_min
         return float(dA * np.sum(X * P_norm * indicator) /
                      (dA * np.sum(X * indicator)))
 
     else:
         raise ValueError(f"Unknown method: '{method}'. Choose 'contour' or 'masking'.")
+
+
+def beta_t_alternative(epsilon, kappa, delta, A=-0.5, N=500):
+    """
+    Compute an alternative beta_toroidal:
+
+        beta_t = ∬ x·psi dxdy / ( ∬ x dxdy · psi_min )
+
+    where psi_min is the minimum (most negative) value of psi inside the
+    zero contour (the value at the magnetic axis).
+
+    Parameters
+    ----------
+    epsilon : float  – inverse aspect ratio
+    kappa   : float  – elongation
+    delta   : float  – triangularity
+    A       : float  – Solov'ev profile parameter (default -0.5)
+    N       : int    – grid resolution for contour extraction and psi_min (default 500)
+
+    Returns
+    -------
+    beta_t : float
+    """
+    if np.ndim(epsilon) > 0 or np.ndim(kappa) > 0 or np.ndim(delta) > 0:
+        _scalar = lambda e, k, d: beta_t_alternative(e, k, d, A, N)
+        return np.vectorize(_scalar)(epsilon, kappa, delta)
+
+    psi, c, _ = make_psi(epsilon, kappa, delta, A)
+
+    x_lim = (1 - epsilon - 0.1, 1 + epsilon + 0.1)
+    y_lim = (-kappa * epsilon - 0.1, kappa * epsilon + 0.1)
+
+    xs, ys  = extract_zero_contour(psi, x_lim, y_lim, n=N)
+    psi_min = _compute_psi_min(psi, epsilon, kappa, N=N)
+
+    psi_integral = int_contour_boundary(lambda x, y: G_total(x, y, A, c), xs, ys)
+    volume       = int_contour_boundary(lambda x, y: x * y, xs, ys)
+
+    return psi_integral / (volume * psi_min)
 
 
 def int_masking(psi, epsilon, kappa, A, N):
@@ -414,6 +458,8 @@ def beta_poloidal(epsilon, kappa=None, delta=None, A=-0.5, N=500):
     beta_p = -2 * (1 - A) * (circum**2 / volume) * psi_integral * factor**(-2)
 
     return beta_p
+
+
 
 def beta_toroidal(epsilon, kappa=None, delta=None, A=-0.5, q=2, N=500):
     arr = np.asarray(epsilon, dtype=float)
