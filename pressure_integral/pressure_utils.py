@@ -306,14 +306,14 @@ def normalized_psi_pressure(epsilon, kappa, delta, A: float = -0.5,
         raise ValueError(f"Unknown method: '{method}'. Choose 'contour' or 'masking'.")
 
 
+
 def beta_t_alternative(epsilon, kappa, delta, A=-0.5, N=500):
     """
     Compute an alternative beta_toroidal:
 
-        beta_t = ∬ x·psi dxdy / ( ∬ x dxdy · psi_min )
+        beta_t = B_0 * epsilon^2 * beta_poloidal(epsilon, kappa, delta, A) * inv_q_star^2
 
-    where psi_min is the minimum (most negative) value of psi inside the
-    zero contour (the value at the magnetic axis).
+    where B_0 = 1/2 is chosen so that beta_t_alternative == normalized_psi_pressure.
 
     Parameters
     ----------
@@ -321,28 +321,67 @@ def beta_t_alternative(epsilon, kappa, delta, A=-0.5, N=500):
     kappa   : float  – elongation
     delta   : float  – triangularity
     A       : float  – Solov'ev profile parameter (default -0.5)
-    N       : int    – grid resolution for contour extraction and psi_min (default 500)
+    N       : int    – grid resolution (default 500)
 
     Returns
     -------
     beta_t : float
     """
+
     if np.ndim(epsilon) > 0 or np.ndim(kappa) > 0 or np.ndim(delta) > 0:
         _scalar = lambda e, k, d: beta_t_alternative(e, k, d, A, N)
         return np.vectorize(_scalar)(epsilon, kappa, delta)
 
-    psi, c, _ = make_psi(epsilon, kappa, delta, A)
+    bp = beta_poloidal(epsilon, kappa, delta, A, N)
+    iq = inv_q_star(epsilon, kappa, delta, A, N=N)
+
+    return epsilon**2 * bp * iq**2
+
+
+def inv_q_star(epsilon, kappa, delta, A=-0.5, R_0=1.0, N=500):
+    """
+    Compute the inverse cylindrical safety factor 1/q*.
+
+        psi_0_squared = -R_0^4 / ((1-A) * psi_min)
+        1/q*          = -(sqrt(psi_0_squared) / (epsilon * R_0^2 * B_0)) * (1/C_p) * integral_factor
+
+    where:
+      psi_min         = minimum (magnetic-axis) value of psi inside the zero contour
+      C_p             = poloidal circumference of the plasma boundary
+      integral_factor = ∬_Ω [A + (1-A)x²]/x dxdy
+
+    Parameters
+    ----------
+    epsilon : float  – inverse aspect ratio
+    kappa   : float  – elongation
+    delta   : float  – triangularity
+    A       : float  – Solov'ev profile parameter (default -0.5)
+    R_0     : float  – major radius normalization (default 1.0, cancels in the formula)
+    N       : int    – grid resolution (default 500)
+
+    Returns
+    -------
+    inv_q : float
+    """
+    if np.ndim(epsilon) > 0 or np.ndim(kappa) > 0 or np.ndim(delta) > 0:
+        _scalar = lambda e, k, d: inv_q_star(e, k, d, A, R_0, N)
+        return np.vectorize(_scalar)(epsilon, kappa, delta)
+
+    psi, _, _ = make_psi(epsilon, kappa, delta, A)
+
+    psi_min       = _compute_psi_min(psi, epsilon, kappa, N=N)
+    psi_0_squared = -R_0**4 / ((1 - A) * psi_min)
 
     x_lim = (1 - epsilon - 0.1, 1 + epsilon + 0.1)
     y_lim = (-kappa * epsilon - 0.1, kappa * epsilon + 0.1)
 
-    xs, ys  = extract_zero_contour(psi, x_lim, y_lim, n=N)
-    psi_min = _compute_psi_min(psi, epsilon, kappa, N=N)
+    xs, ys = extract_zero_contour(psi, x_lim, y_lim, n=N)
 
-    psi_integral = int_contour_boundary(lambda x, y: G_total(x, y, A, c), xs, ys)
-    volume       = int_contour_boundary(lambda x, y: x * y, xs, ys)
+    C_p             = poloidal_circum(xs, ys)
+    integral_factor = integral_multiplier(epsilon, kappa, delta, A, N=N)
 
-    return psi_integral / (volume * psi_min)
+    B_0 = 2
+    return -(np.sqrt(psi_0_squared) / (epsilon * R_0**2*B_0)) * (1 / C_p) * integral_factor
 
 
 def int_masking(psi, epsilon, kappa, A, N):
