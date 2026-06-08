@@ -1,4 +1,4 @@
-"""Plot averaged volume pressure contours for shape-parameter pairs."""
+"""Plot pressure contours for shape-parameter pairs."""
 
 from __future__ import annotations
 
@@ -11,10 +11,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+for path in (ROOT, ROOT / "pressure_integral", ROOT / "ITER_Equilibria"):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
-from pressure_integral.pressure_utils import get_vol_av_p_from_params  # noqa: E402
+from pressure_integral.pressure_utils import (  # noqa: E402
+    get_vol_av_p_from_params,
+    normalized_psi_pressure as pressure_utils_normalized_psi_pressure,
+)
 
 
 DEFAULT_INITIAL_SHAPE = (0.32, 1.30, 0.20)
@@ -27,10 +31,12 @@ DEFAULT_A_START = 0.0
 DEFAULT_A_STOP = -0.5
 DEFAULT_A_COUNT = 6
 DEFAULT_CONTOUR_COUNT = 30
-DEFAULT_N_QUAD = 256
+DEFAULT_N_QUAD = 500
 DEFAULT_GRID_SIZE = 300
-DEFAULT_METHOD = "parametric"
+DEFAULT_METHOD = "contour"
+DEFAULT_NORMALIZED_METHOD = "contour"
 DEFAULT_OUTPUT = Path(__file__).with_name("diagnostic.png")
+DEFAULT_QUANTITY = "averaged-volume-pressure"
 
 PARAMETER_NAMES = ("epsilon", "kappa", "delta")
 PARAMETER_INDEX = {name: index for index, name in enumerate(PARAMETER_NAMES)}
@@ -44,6 +50,18 @@ PARAMETER_PAIRS = (
     ("kappa", "delta"),
     ("delta", "epsilon"),
 )
+QUANTITY_LABELS = {
+    "averaged-volume-pressure": "Averaged volume pressure",
+    "normalized-psi-pressure": "Normalized psi pressure",
+}
+
+
+def _resolve_method(quantity, method):
+    if method is not None:
+        return method
+    if quantity == "normalized-psi-pressure":
+        return DEFAULT_NORMALIZED_METHOD
+    return DEFAULT_METHOD
 
 
 def averaged_volume_pressure(
@@ -76,6 +94,30 @@ def averaged_volume_pressure(
     return float(value)
 
 
+def normalized_psi_pressure(
+    epsilon,
+    kappa,
+    delta,
+    A,
+    method=DEFAULT_NORMALIZED_METHOD,
+    grid_size=DEFAULT_GRID_SIZE,
+):
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            value = pressure_utils_normalized_psi_pressure(
+                float(epsilon),
+                float(kappa),
+                float(delta),
+                A=float(A),
+                method=method,
+                N=int(grid_size),
+            )
+    except (ArithmeticError, ValueError, RuntimeWarning, np.linalg.LinAlgError):
+        return np.nan
+    return float(value)
+
+
 def _shape_for_pair(base_shape, pair, x_value, y_value):
     shape = list(base_shape)
     shape[PARAMETER_INDEX[pair[0]]] = float(x_value)
@@ -88,10 +130,12 @@ def scan_pressure_contours(
     parameter_ranges,
     base_shape=DEFAULT_INITIAL_SHAPE,
     count=DEFAULT_CONTOUR_COUNT,
-    method=DEFAULT_METHOD,
+    method=None,
     n_quad=DEFAULT_N_QUAD,
     grid_size=DEFAULT_GRID_SIZE,
+    quantity=DEFAULT_QUANTITY,
 ):
+    method = _resolve_method(quantity, method)
     surfaces = []
     for A in a_values:
         row = []
@@ -108,15 +152,25 @@ def scan_pressure_contours(
                     X[index],
                     Y[index],
                 )
-                Z[index] = averaged_volume_pressure(
-                    epsilon,
-                    kappa,
-                    delta,
-                    A=A,
-                    method=method,
-                    n_quad=n_quad,
-                    grid_size=grid_size,
-                )
+                if quantity == "normalized-psi-pressure":
+                    Z[index] = normalized_psi_pressure(
+                        epsilon,
+                        kappa,
+                        delta,
+                        A=A,
+                        method=method,
+                        grid_size=grid_size,
+                    )
+                else:
+                    Z[index] = averaged_volume_pressure(
+                        epsilon,
+                        kappa,
+                        delta,
+                        A=A,
+                        method=method,
+                        n_quad=n_quad,
+                        grid_size=grid_size,
+                    )
 
             row.append({"pair": pair, "X": X, "Y": Y, "Z": Z})
         surfaces.append({"A": float(A), "columns": row})
@@ -151,6 +205,7 @@ def plot_pressure_contours(
     surfaces,
     base_shape=DEFAULT_INITIAL_SHAPE,
     output_path=DEFAULT_OUTPUT,
+    quantity_label=QUANTITY_LABELS[DEFAULT_QUANTITY],
 ):
     output_path = Path(output_path)
     row_count = len(surfaces)
@@ -210,7 +265,7 @@ def plot_pressure_contours(
             mappable,
             ax=axes,
             shrink=0.92,
-            label="Averaged volume pressure",
+            label=quantity_label,
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -259,9 +314,19 @@ def _build_parser():
     parser.add_argument("--A-count", type=int, default=DEFAULT_A_COUNT)
     parser.add_argument("--count", type=int, default=DEFAULT_CONTOUR_COUNT)
     parser.add_argument(
+        "--quantity",
+        choices=tuple(QUANTITY_LABELS),
+        default=DEFAULT_QUANTITY,
+        help="Pressure quantity to plot.",
+    )
+    parser.add_argument(
         "--method",
         choices=("parametric", "contour", "masking"),
-        default=DEFAULT_METHOD,
+        default=None,
+        help=(
+            "Integration method. Defaults to parametric for averaged volume "
+            "pressure and contour for normalized psi pressure."
+        ),
     )
     parser.add_argument("--n-quad", type=int, default=DEFAULT_N_QUAD)
     parser.add_argument("--grid-size", type=int, default=DEFAULT_GRID_SIZE)
@@ -270,14 +335,20 @@ def _build_parser():
 
 
 def _validate_args(args):
+    method = _resolve_method(args.quantity, args.method)
+
     if args.count <= 0:
         raise ValueError("--count must be positive")
     if args.A_count <= 0:
         raise ValueError("--A-count must be positive")
-    if args.method == "parametric" and args.n_quad <= 0:
+    if method == "parametric" and args.n_quad <= 0:
         raise ValueError("--n-quad must be positive")
-    if args.method != "parametric" and args.grid_size <= 0:
+    if method != "parametric" and args.grid_size <= 0:
         raise ValueError("--grid-size must be positive")
+    if args.quantity == "normalized-psi-pressure" and method == "parametric":
+        raise ValueError(
+            "--method parametric is not supported for normalized-psi-pressure"
+        )
 
     for name in PARAMETER_NAMES:
         low = getattr(args, f"{name}_min")
@@ -296,16 +367,23 @@ def main(argv=None):
         "delta": (args.delta_min, args.delta_max),
     }
     a_values = np.linspace(args.A_start, args.A_stop, int(args.A_count))
+    method = _resolve_method(args.quantity, args.method)
     surfaces = scan_pressure_contours(
         a_values,
         parameter_ranges,
         base_shape=base_shape,
         count=args.count,
-        method=args.method,
+        method=method,
         n_quad=args.n_quad,
         grid_size=args.grid_size,
+        quantity=args.quantity,
     )
-    output_path = plot_pressure_contours(surfaces, base_shape, args.output)
+    output_path = plot_pressure_contours(
+        surfaces,
+        base_shape,
+        args.output,
+        quantity_label=QUANTITY_LABELS[args.quantity],
+    )
     print(f"Saved plot: {output_path}")
 
 
