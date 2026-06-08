@@ -43,7 +43,7 @@ for source_dir in (ROOT, ROOT / "pressure_integral", ROOT / "ITER_Equilibria"):
     if str(source_dir) not in sys.path:
         sys.path.insert(0, str(source_dir))
 
-from pressure_integral.pressure_utils import _normalized_psi_pressure  # noqa: E402
+from pressure_integral.pressure_utils import normalized_psi_pressure  # noqa: E402
 
 
 PARAMETER_NAMES = ("epsilon", "kappa", "delta")
@@ -102,7 +102,7 @@ def pressure_from_shape(shape, A=DEFAULT_A, method=DEFAULT_METHOD, N=DEFAULT_N):
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
-            value = _normalized_psi_pressure(
+            value = - normalized_psi_pressure(
                 float(epsilon),
                 float(kappa),
                 float(delta),
@@ -438,7 +438,7 @@ def parse_args():
         "--N",
         type=int,
         default=DEFAULT_N,
-        help="Grid resolution passed to _normalized_psi_pressure.",
+        help="Grid resolution passed to normalized_psi_pressure.",
     )
     parser.add_argument(
         "--maxiter",
@@ -450,13 +450,13 @@ def parse_args():
         "--A",
         type=float,
         default=DEFAULT_A,
-        help="A parameter passed to _normalized_psi_pressure.",
+        help="A parameter passed to normalized_psi_pressure.",
     )
     parser.add_argument(
         "--method",
         choices=("contour", "masking"),
         default=DEFAULT_METHOD,
-        help="Evaluation method passed to _normalized_psi_pressure.",
+        help="Evaluation method passed to normalized_psi_pressure.",
     )
     parser.add_argument(
         "--output-dir",

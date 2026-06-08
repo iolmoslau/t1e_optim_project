@@ -16,8 +16,8 @@ for path in (ROOT, ROOT / "pressure_integral", ROOT / "ITER_Equilibria"):
         sys.path.insert(0, str(path))
 
 from pressure_integral.pressure_utils import (  # noqa: E402
-    _normalized_psi_pressure,
     get_vol_av_p_from_params,
+    normalized_psi_pressure as pressure_utils_normalized_psi_pressure,
 )
 
 
@@ -105,7 +105,7 @@ def normalized_psi_pressure(
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
-            value = _normalized_psi_pressure(
+            value = pressure_utils_normalized_psi_pressure(
                 float(epsilon),
                 float(kappa),
                 float(delta),

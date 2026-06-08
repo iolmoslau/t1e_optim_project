@@ -71,7 +71,7 @@ DEFAULT_A = -0.5
 DEFAULT_METHOD = "contour"
 DEFAULT_N = 60
 DEFAULT_GRID_SIZE = 20
-DEFAULT_MAXITER = 80
+DEFAULT_MAXITER = 200
 DEFAULT_OUTPUT_DIR = Path("./optimal_JAX/output/landscape_beta_t_output")
 FINITE_DIFFERENCE_STEPS = np.array([1e-4, 1e-4, 1e-4], dtype=float)
 BAD_OBJECTIVE_VALUE = 1e100

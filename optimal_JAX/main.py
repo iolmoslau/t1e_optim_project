@@ -43,9 +43,9 @@ for source_dir in (
         sys.path.insert(0, str(source_dir))
 
 from pressure_integral.pressure_utils import (
-    _normalized_psi_pressure,
     get_vol_av_p_from_params,
     make_psi,
+    normalized_psi_pressure as pressure_utils_normalized_psi_pressure,
 )
 
 
@@ -165,7 +165,7 @@ def _normalized_pressure_value_from_shape_host(shape, A, method, grid_size):
         epsilon, kappa, delta = _validate_shape_domain(shape)
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
-            value = _normalized_psi_pressure(
+            value = pressure_utils_normalized_psi_pressure(
                 epsilon,
                 kappa,
                 delta,
