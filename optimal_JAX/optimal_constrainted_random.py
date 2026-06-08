@@ -8,6 +8,7 @@ import argparse
 import numpy as np
 
 from optimal_constrainted_norm_p import (
+    BETA_T_ALT_OBJECTIVE,
     BETA_T_OBJECTIVE,
     DEFAULT_A,
     DEFAULT_MAXITER,
@@ -83,10 +84,16 @@ def parse_args():
         default=5,
         help="Number of random initial guesses to run.",
     )
-    parser.add_argument(
+    objective_group = parser.add_mutually_exclusive_group()
+    objective_group.add_argument(
         "--beta_t",
         action="store_true",
         help="Maximize beta_toroidal instead of normalized pressure.",
+    )
+    objective_group.add_argument(
+        "--beta_t_alt",
+        action="store_true",
+        help="Maximize beta_t_alternative instead of normalized pressure.",
     )
     parser.add_argument(
         "--seed",
@@ -152,7 +159,12 @@ def main():
     if args.volume_points < 16:
         raise ValueError("--volume-points must be at least 16.")
 
-    objective_name = BETA_T_OBJECTIVE if args.beta_t else NORMALIZED_OBJECTIVE
+    if args.beta_t_alt:
+        objective_name = BETA_T_ALT_OBJECTIVE
+    elif args.beta_t:
+        objective_name = BETA_T_OBJECTIVE
+    else:
+        objective_name = NORMALIZED_OBJECTIVE
     parameter_ranges = shape_ranges_from_args(args)
     rng = np.random.default_rng(args.seed)
     target_volume = volume_from_shape(TARGET_SHAPE, point_count=args.volume_points)

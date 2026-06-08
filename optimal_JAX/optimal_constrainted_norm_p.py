@@ -69,6 +69,7 @@ DEFAULT_Q = 2.0
 BAD_OBJECTIVE_VALUE = 1e100
 NORMALIZED_OBJECTIVE = "normalized_pressure"
 BETA_T_OBJECTIVE = "beta_toroidal"
+BETA_T_ALT_OBJECTIVE = "beta_t_alternative"
 
 # Physical parameter limits used by the optimizer.
 PARAMETER_BOUNDS = {
@@ -236,6 +237,17 @@ def normalized_pressure_jax(shape, A=DEFAULT_A, N=DEFAULT_N):
     return -numerator 
 
 #/ denominator
+def plasma_flux_min_jax(shape, A=DEFAULT_A, N=DEFAULT_N):
+    """Minimum flux inside the plasma, used by beta_t_alternative."""
+    epsilon, kappa, delta = shape
+    x = jnp.linspace(1.0 - epsilon, 1.0 + epsilon, int(N))
+    y = jnp.linspace(-kappa * epsilon, kappa * epsilon, int(N))
+    X, Y = jnp.meshgrid(x, y, indexing="xy")
+    flux = psi_value(X, Y, epsilon, kappa, delta, A)
+    inside_plasma = flux <= 0.0
+    return jnp.min(jnp.where(inside_plasma, flux, jnp.inf))
+
+
 def int_contour_boundary_jax(values, x_points):
     """Green's theorem line integral used by pressure_utils.py."""
     dx = x_points[1:] - x_points[:-1]
@@ -306,8 +318,8 @@ def volume_jax(shape, point_count=DEFAULT_VOLUME_POINTS):
     return -jnp.sum(x_mid * y_mid * dx)
 
 
-def beta_toroidal_jax(shape, A=DEFAULT_A, q=DEFAULT_Q, N=DEFAULT_VOLUME_POINTS):
-    """Score one shape by toroidal beta."""
+def beta_poloidal_jax(shape, A=DEFAULT_A, N=DEFAULT_VOLUME_POINTS):
+    """Poloidal beta formula shared by beta_t objectives."""
     epsilon, kappa, delta = shape
     x_points, y_points = miller_boundary(shape, point_count=int(N))
     x_mid = 0.5 * (x_points[:-1] + x_points[1:])
@@ -325,8 +337,41 @@ def beta_toroidal_jax(shape, A=DEFAULT_A, q=DEFAULT_Q, N=DEFAULT_VOLUME_POINTS):
         x_points,
     )
 
-    beta_poloidal = -2.0 * (1.0 - A) * (circum**2 / volume) * psi_integral * factor**-2
+    return -2.0 * (1.0 - A) * (circum**2 / volume) * psi_integral * factor**-2
+
+
+def beta_toroidal_jax(shape, A=DEFAULT_A, q=DEFAULT_Q, N=DEFAULT_VOLUME_POINTS):
+    """Score one shape by toroidal beta."""
+    epsilon = shape[0]
+    beta_poloidal = beta_poloidal_jax(shape, A=A, N=N)
     return epsilon**2 * beta_poloidal / q**2
+
+
+def inv_q_star_jax(shape, A=DEFAULT_A, N=DEFAULT_VOLUME_POINTS):
+    """Local JAX version of pressure_utils.inv_q_star."""
+    epsilon = shape[0]
+    x_points, y_points = miller_boundary(shape, point_count=int(N))
+    x_mid = 0.5 * (x_points[:-1] + x_points[1:])
+    y_mid = 0.5 * (y_points[:-1] + y_points[1:])
+
+    psi_min = plasma_flux_min_jax(shape, A=A, N=N)
+    psi_0_squared = -1.0 / ((1.0 - A) * psi_min)
+    circum = poloidal_circum_jax(x_points, y_points)
+    integral_factor = int_contour_boundary_jax(
+        y_mid * (A / x_mid + (1.0 - A) * x_mid),
+        x_points,
+    )
+
+    B_0 = 2.0
+    return -(jnp.sqrt(psi_0_squared) / (epsilon * B_0)) * integral_factor / circum
+
+
+def beta_t_alternative_jax(shape, A=DEFAULT_A, N=DEFAULT_VOLUME_POINTS):
+    """Alternative beta_t formula from pressure_utils.py."""
+    epsilon = shape[0]
+    beta_poloidal = beta_poloidal_jax(shape, A=A, N=N)
+    inv_q = inv_q_star_jax(shape, A=A, N=N)
+    return epsilon**2 * beta_poloidal * inv_q**2
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +393,8 @@ def shape_is_valid(shape):
 
 def objective_label(objective_name):
     """Readable objective name for printed output and plots."""
+    if objective_name == BETA_T_ALT_OBJECTIVE:
+        return "beta_t_alternative"
     if objective_name == BETA_T_OBJECTIVE:
         return "beta_toroidal"
     return "normalized pressure"
@@ -355,6 +402,8 @@ def objective_label(objective_name):
 
 def objective_slug(objective_name):
     """Filename-safe objective name."""
+    if objective_name == BETA_T_ALT_OBJECTIVE:
+        return "beta_t_alternative"
     if objective_name == BETA_T_OBJECTIVE:
         return "beta_toroidal"
     return "normalized_pressure"
@@ -372,6 +421,8 @@ def plot_path_for_objective(path, objective_name):
 
 def objective_value_jax(shape, objective_name, A=DEFAULT_A, N=DEFAULT_N):
     """Evaluate the selected objective for JAX optimization."""
+    if objective_name == BETA_T_ALT_OBJECTIVE:
+        return beta_t_alternative_jax(shape, A=A, N=N)
     if objective_name == BETA_T_OBJECTIVE:
         return beta_toroidal_jax(shape, A=A, q=DEFAULT_Q, N=N)
     return normalized_pressure_jax(shape, A=A, N=N)
@@ -651,10 +702,16 @@ def parse_args():
         default=DEFAULT_A,
         help="A parameter used by the local normalized-pressure calculation.",
     )
-    parser.add_argument(
+    objective_group = parser.add_mutually_exclusive_group()
+    objective_group.add_argument(
         "--beta_t",
         action="store_true",
         help="Maximize beta_toroidal instead of normalized pressure.",
+    )
+    objective_group.add_argument(
+        "--beta_t_alt",
+        action="store_true",
+        help="Maximize beta_t_alternative instead of normalized pressure.",
     )
     parser.add_argument(
         "--start-epsilon",
@@ -713,7 +770,12 @@ def main():
     if not shape_is_valid(start_shape):
         raise ValueError("The starting shape is outside the allowed parameter bounds.")
 
-    objective_name = BETA_T_OBJECTIVE if args.beta_t else NORMALIZED_OBJECTIVE
+    if args.beta_t_alt:
+        objective_name = BETA_T_ALT_OBJECTIVE
+    elif args.beta_t:
+        objective_name = BETA_T_OBJECTIVE
+    else:
+        objective_name = NORMALIZED_OBJECTIVE
     plot_path = plot_path_for_objective(args.plot, objective_name)
     target_volume = volume_from_shape(TARGET_SHAPE, point_count=args.volume_points)
 
