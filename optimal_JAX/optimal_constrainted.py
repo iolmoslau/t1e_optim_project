@@ -59,7 +59,7 @@ TARGET_SHAPE = np.array([0.45, 1.9, 0.0], dtype=float)
 DEFAULT_A = -0.05
 DEFAULT_N = 500
 DEFAULT_VOLUME_POINTS = 512
-DEFAULT_MAXITER = 80
+DEFAULT_MAXITER = 200
 DEFAULT_PLOT = Path("optimal_JAX/output/optimal_constrainted_norm_p_flux_contours.png")
 DEFAULT_PLOT_GRID_SIZE = 600
 DEFAULT_CONTOUR_COUNT = 20
