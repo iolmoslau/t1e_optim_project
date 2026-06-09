@@ -515,7 +515,93 @@ def beta_toroidal(epsilon, kappa=None, delta=None, A=-0.5, q=2, N=500):
     return epsilon**2 * beta_p / q**2
 
 
+MU_0 = 4 * np.pi * 1e-7  # magnetic permeability of free space [T·m/A]
 
 
+def beta_poloidal_updated(shape_params: tuple, R_0: float, I: float,
+                          A: float = -0.5, N: int = 500) -> float:
+    """
+    Compute the poloidal beta from physical parameters:
+
+        beta_p = (4π² ε² R_0² (1 + κ²) / (μ_0 I²)) * <p>
+
+    where <p> = normalized_psi_pressure(ε, κ, δ, A) is the volume-averaged
+    pressure normalised by psi_min.
+
+    Parameters
+    ----------
+    shape_params : tuple (epsilon, kappa, delta)
+        epsilon – inverse aspect ratio
+        kappa   – elongation
+        delta   – triangularity
+    R_0          : float – major radius [m]
+    I            : float – plasma current [A]
+    A            : float – Solov'ev profile parameter (default -0.5)
+    N            : int   – grid resolution (default 500)
+
+    Returns
+    -------
+    beta_p : float
+    """
+    epsilon, kappa, delta = shape_params
+
+    p_avg  = normalized_psi_pressure(epsilon, kappa, delta, A=A, N=N)
+    prefactor = (4 * np.pi**2 * epsilon**2 * R_0**2 * (1 + kappa**2)) / (MU_0 * I**2)
+
+    return prefactor * p_avg
 
 
+def q_star_updated(shape_params: tuple, R_0: float, I: float, B_0: float) -> float:
+    """
+    Compute the cylindrical safety factor q* from physical parameters:
+
+        q* = 2π ε² R_0² B_0 (1 + κ²) / (2 μ_0 R_0 I)
+
+    Parameters
+    ----------
+    shape_params : tuple (epsilon, kappa, delta)
+        epsilon – inverse aspect ratio
+        kappa   – elongation
+        delta   – triangularity  (unused in this formula, included for consistency)
+    R_0  : float – major radius [m]
+    I    : float – plasma current [A]
+    B_0  : float – toroidal magnetic field at the magnetic axis [T]
+
+    Returns
+    -------
+    q_star : float
+    """
+    epsilon, kappa, _ = shape_params
+
+    return (2 * np.pi * epsilon**2 * R_0**2 * B_0 * (1 + kappa**2)) / (2 * MU_0 * R_0 * I)
+
+
+def beta_toroidal_updated(shape_params: tuple, R_0: float, I: float, B_0: float,
+                          A: float = -0.5, N: int = 500) -> float:
+    """
+    Compute the toroidal beta from physical parameters:
+
+        beta_t = (ε² * beta_p_updated / q*_updated²) * (1 + κ²) / 2
+
+    Parameters
+    ----------
+    shape_params : tuple (epsilon, kappa, delta)
+        epsilon – inverse aspect ratio
+        kappa   – elongation
+        delta   – triangularity
+    R_0  : float – major radius [m]
+    I    : float – plasma current [A]
+    B_0  : float – toroidal magnetic field at the magnetic axis [T]
+    A    : float – Solov'ev profile parameter (default -0.5)
+    N    : int   – grid resolution for pressure integral (default 500)
+
+    Returns
+    -------
+    beta_t : float
+    """
+    epsilon, kappa, _ = shape_params
+
+    beta_p = beta_poloidal_updated(shape_params, R_0, I, A=A, N=N)
+    q_star = q_star_updated(shape_params, R_0, I, B_0)
+
+    return (epsilon**2 * beta_p / q_star**2) * (1 + kappa**2) / 2
