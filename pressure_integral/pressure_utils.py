@@ -27,6 +27,9 @@ returns callables and so only accepts scalar shape parameters.
 
 import functools
 
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+
 import numpy as np
 from contourpy import contour_generator
 
@@ -69,6 +72,7 @@ __all__ = [
     "beta_toroidal_updated",
     "MU_0",
     "DEFAULT_A",
+    "plot_plasma_profile",
 ]
 
 
@@ -676,3 +680,71 @@ def beta_toroidal_updated(epsilon, kappa, delta, R_0: float, I: float,
     beta_p = beta_poloidal_updated(epsilon, kappa, delta, R_0, I, A=A, N=N)
     q_star = q_star_updated(epsilon, kappa, delta, R_0, I, B_0)
     return (epsilon**2 * beta_p / q_star**2) * (1 + kappa**2) / 2
+
+
+def plot_plasma_profile(epsilon, kappa, delta, A: float = DEFAULT_A, N: int = 500,
+                        n_levels: int = 30, colorbar: bool = True,
+                        title: bool = True, ylabel: bool = True, ax=None):
+    """
+    Plot psi contours inside the plasma boundary (psi = 0) using the 'plasma'
+    colormap.
+
+    Parameters
+    ----------
+    epsilon  : float – inverse aspect ratio
+    kappa    : float – elongation
+    delta    : float – triangularity
+    A        : float – Solov'ev profile parameter (default DEFAULT_A)
+    N        : int   – grid resolution (default 500)
+    n_levels : int   – number of contour levels (default 30)
+    colorbar : bool  – show continuous colourbar on the right (default True)
+    title    : bool  – show shape-parameter title above the plot (default True)
+    ax       : matplotlib Axes or None – draw into existing axes if provided
+
+    Returns
+    -------
+    ax : matplotlib Axes
+    """
+    import matplotlib.cm as cm
+    import matplotlib.colors as mcolors
+
+    psi, _, _ = make_psi(epsilon, kappa, delta, A)
+    x_lim, y_lim = _plasma_domain(epsilon, kappa)
+
+    x = np.linspace(*x_lim, N)
+    y = np.linspace(*y_lim, N)
+    X, Y = np.meshgrid(x, y)
+    PSI = psi(X, Y)
+
+    interior = np.where(PSI <= 0, PSI, np.nan)
+    levels = np.linspace(-0.05, 0, n_levels)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(4.2, 4.3))
+    else:
+        fig = ax.get_figure()
+
+    # Fix the main axes position so it is identical with or without a colorbar.
+    fig.subplots_adjust(left=0.13, right=0.76, top=0.93, bottom=0.11)
+
+    ax.contour(X, Y, interior, levels=levels, cmap='plasma')
+    ax.set_aspect('equal')
+    ax.set_xlabel(r'$R/R_0$')
+    if ylabel:
+        ax.set_ylabel(r'$Z/R_0$')
+    else:
+        ax.tick_params(axis='y', left=False, labelleft=False)
+
+    if title:
+        ax.set_title(rf'$\epsilon={epsilon:.3f},\;\kappa={kappa:.3f},\;\delta={delta:.3f}$',
+                     fontsize=9)
+    ax.xaxis.set_major_locator(mticker.MaxNLocator(3))
+
+    if colorbar:
+        norm = mcolors.Normalize(vmin=-0.05, vmax=0)
+        sm   = cm.ScalarMappable(cmap='plasma', norm=norm)
+        sm.set_array([])
+        cax = fig.add_axes((0.79, 0.11, 0.03, 0.82))
+        fig.colorbar(sm, cax=cax, label=r'$\psi$')
+
+    return ax
