@@ -595,7 +595,7 @@ def beta_toroidal(epsilon, kappa, delta, A: float = DEFAULT_A,
 
 # ── physical-parameter API ────────────────────────────────────────────────────
 @accepts_shape_params
-def beta_poloidal_updated(epsilon, kappa, delta, R_0: float, I: float,
+def beta_poloidal_updated(epsilon, kappa, delta, R_0: float, I: float, P_0:float,
                           A: float = DEFAULT_A, N: int = 500) -> float:
     """
     Poloidal beta from physical parameters:
@@ -614,12 +614,13 @@ def beta_poloidal_updated(epsilon, kappa, delta, R_0: float, I: float,
     I   : float – plasma current [A]
     A   : float – Solov'ev profile parameter (default DEFAULT_A)
     N   : int   – grid resolution (default 500)
+    P_0 : float - Pressure scaling
 
     Returns
     -------
     beta_p : float
     """
-    p_avg = normalized_psi_pressure(epsilon, kappa, delta, A=A, N=N)
+    p_avg = P_0*normalized_psi_pressure(epsilon, kappa, delta, A=A, N=N)
     prefactor = (4 * np.pi**2 * epsilon**2 * R_0**2 * (1 + kappa**2)) / (MU_0 * I**2)
     return prefactor * p_avg
 
@@ -651,7 +652,7 @@ def q_star_updated(epsilon, kappa, delta, R_0: float, I: float,
 
 
 @accepts_shape_params
-def beta_toroidal_updated(epsilon, kappa, delta, R_0: float, I: float,
+def beta_toroidal_updated(epsilon, kappa, delta, R_0: float, I: float, P_0: float,
                           B_0: float, A: float = DEFAULT_A, N: int = 500) -> float:
     """
     Toroidal beta from physical parameters:
@@ -677,7 +678,7 @@ def beta_toroidal_updated(epsilon, kappa, delta, R_0: float, I: float,
     -------
     beta_t : float
     """
-    beta_p = beta_poloidal_updated(epsilon, kappa, delta, R_0, I, A=A, N=N)
+    beta_p = beta_poloidal_updated(epsilon, kappa, delta, R_0, I,P_0, A=A, N=N)
     q_star = q_star_updated(epsilon, kappa, delta, R_0, I, B_0)
     return (epsilon**2 * beta_p / q_star**2) * (1 + kappa**2) / 2
 
