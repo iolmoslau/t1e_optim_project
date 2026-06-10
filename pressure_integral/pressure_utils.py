@@ -717,8 +717,9 @@ def plot_plasma_profile(epsilon, kappa, delta, A: float = DEFAULT_A, N: int = 50
     X, Y = np.meshgrid(x, y)
     PSI = psi(X, Y)
 
-    interior = np.where(PSI <= 0, PSI, np.nan)
-    levels = np.linspace(-0.05, 0, n_levels)
+    psi_min  = _compute_psi_min(psi, epsilon, kappa, N=N)
+    interior = np.where(PSI <= 0, PSI / psi_min, np.nan)
+    levels   = np.linspace(0, 1, n_levels)
 
     if ax is None:
         fig, ax = plt.subplots(figsize=(4.2, 4.3))
@@ -733,8 +734,6 @@ def plot_plasma_profile(epsilon, kappa, delta, A: float = DEFAULT_A, N: int = 50
     ax.set_xlabel(r'$R/R_0$')
     if ylabel:
         ax.set_ylabel(r'$Z/R_0$')
-    else:
-        ax.tick_params(axis='y', left=False, labelleft=False)
 
     if title:
         ax.set_title(rf'$\epsilon={epsilon:.3f},\;\kappa={kappa:.3f},\;\delta={delta:.3f}$',
@@ -742,10 +741,10 @@ def plot_plasma_profile(epsilon, kappa, delta, A: float = DEFAULT_A, N: int = 50
     ax.xaxis.set_major_locator(mticker.MaxNLocator(3))
 
     if colorbar:
-        norm = mcolors.Normalize(vmin=-0.05, vmax=0)
+        norm = mcolors.Normalize(vmin=0, vmax=1)
         sm   = cm.ScalarMappable(cmap='plasma', norm=norm)
         sm.set_array([])
         cax = fig.add_axes((0.79, 0.11, 0.03, 0.82))
-        fig.colorbar(sm, cax=cax, label=r'$\psi$')
+        fig.colorbar(sm, cax=cax, label='Normalised pressure')
 
     return ax
