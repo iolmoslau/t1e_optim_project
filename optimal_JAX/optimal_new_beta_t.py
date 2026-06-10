@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""New toroidal-beta helpers built on the existing constrained optimizer code."""
+"""
+A shape is the triple [epsilon, kappa, delta].  This script asks:
+
+    maximize objective(epsilon, kappa, delta)
+    subject to volume(epsilon, kappa, delta) = target_volume
+    q_* >= 2
+    kappa <= 2.1
+"""
 
 from __future__ import annotations
 
@@ -9,42 +16,27 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import minimize
 
-try:
-    from optimal_JAX.optimal_constrainted import (
-        BAD_OBJECTIVE_VALUE,
-        BETA_T_OBJECTIVE,
-        DEFAULT_A,
-        DEFAULT_CONTOUR_COUNT,
-        DEFAULT_MAXITER,
-        DEFAULT_N,
-        DEFAULT_PLOT_GRID_SIZE,
-        DEFAULT_VOLUME_POINTS,
-        PARAMETER_BOUNDS as BASE_PARAMETER_BOUNDS,
-        PARAMETER_NAMES,
-        plot_flux_contours,
-        print_shape,
-        psi_value,
-        volume_from_shape,
-        volume_jax,
-    )
-except ModuleNotFoundError:
-    from optimal_constrainted import (
-        BAD_OBJECTIVE_VALUE,
-        BETA_T_OBJECTIVE,
-        DEFAULT_A,
-        DEFAULT_CONTOUR_COUNT,
-        DEFAULT_MAXITER,
-        DEFAULT_N,
-        DEFAULT_PLOT_GRID_SIZE,
-        DEFAULT_VOLUME_POINTS,
-        PARAMETER_BOUNDS as BASE_PARAMETER_BOUNDS,
-        PARAMETER_NAMES,
-        plot_flux_contours,
-        print_shape,
-        psi_value,
-        volume_from_shape,
-        volume_jax,
-    )
+from optimal_vol_constrainted import (
+    BAD_OBJECTIVE_VALUE,
+    BETA_T_OBJECTIVE,
+    DEFAULT_A,
+    DEFAULT_CONTOUR_COUNT,
+    DEFAULT_MAXITER,
+    DEFAULT_N,
+    DEFAULT_PLOT_GRID_SIZE,
+    DEFAULT_VOLUME_POINTS,
+    G_total_jax,
+    int_contour_boundary_jax,
+    miller_boundary,
+    PARAMETER_BOUNDS as BASE_PARAMETER_BOUNDS,
+    PARAMETER_NAMES,
+    plot_flux_contours,
+    print_shape,
+    psi_value,
+    solve_coefficients,
+    volume_jax,
+)
+
 
 import jax
 import jax.numpy as jnp
@@ -52,27 +44,33 @@ import jax.numpy as jnp
 
 DEFAULT_P_0 = 1.0
 DEFAULT_PLOT = Path("optimal_JAX/output/optimal_new_beta_t_flux_contours.png")
+SLSQP_OBJECTIVE_SCALE = 1
 B_0 = 12.2  # T
-I = 8.7  # MA
+I = 8.7e6  # A
 R_0 = 1.85  # m
 epsilon_sep = 0.31
 kappa_sep = 1.97
 delta_sep = 0.54
-mu_0 = 1.0
+MU_0 = 4.0 * np.pi * 1e-7
 
 MIN_Q_STAR = 2.0
 MAX_KAPPA = 2.1
 SEP_SHAPE = np.array([epsilon_sep, kappa_sep, delta_sep], dtype=float)
+MIN_EPSILON = 0.1
+MAX_EPSILON = 0.5
+MIN_DELTA = -0.75
+MAX_DELTA = 0.84
 
 PARAMETER_BOUNDS = {
-    "epsilon": BASE_PARAMETER_BOUNDS["epsilon"],
+    "epsilon": (MIN_EPSILON, MAX_EPSILON),
     "kappa": (BASE_PARAMETER_BOUNDS["kappa"][0], MAX_KAPPA),
-    "delta": BASE_PARAMETER_BOUNDS["delta"],
+    "delta": (MIN_DELTA, MAX_DELTA),
 }
 
 
 def average_pressure_jax(shape, p_0, A=DEFAULT_A, N=DEFAULT_N):
-    """Volume average of p_0 * Psi / Psi_min inside the plasma."""
+    """Contour volume average of Psi / Psi_min inside the plasma."""
+    _ = p_0  # Kept for backwards-compatible callers; beta_t does not use p_0.
     epsilon, kappa, delta = shape
     x = jnp.linspace(1.0 - epsilon, 1.0 + epsilon, int(N))
     y = jnp.linspace(-kappa * epsilon, kappa * epsilon, int(N))
@@ -80,17 +78,18 @@ def average_pressure_jax(shape, p_0, A=DEFAULT_A, N=DEFAULT_N):
 
     flux = psi_value(X, Y, epsilon, kappa, delta, A)
     inside_plasma = flux <= 0.0
-    inside_weight = inside_plasma.astype(jnp.float64)
 
     psi_min = jnp.min(jnp.where(inside_plasma, flux, jnp.inf))
-    pressure = p_0 * flux / psi_min
 
-    dx = (x[-1] - x[0]) / (int(N) - 1)
-    dy = (y[-1] - y[0]) / (int(N) - 1)
-    cell_area = dx * dy
-
-    numerator = cell_area * jnp.sum(X * pressure * inside_weight)
-    denominator = cell_area * jnp.sum(X * inside_weight)
+    x_points, y_points = miller_boundary(shape, point_count=int(N))
+    x_mid = 0.5 * (x_points[:-1] + x_points[1:])
+    y_mid = 0.5 * (y_points[:-1] + y_points[1:])
+    coefficients = solve_coefficients(epsilon, kappa, delta, A)
+    numerator = int_contour_boundary_jax(
+        G_total_jax(x_mid, y_mid, A, coefficients) / psi_min,
+        x_points,
+    )
+    denominator = int_contour_boundary_jax(x_mid * y_mid, x_points)
     return numerator / denominator
 
 
@@ -103,8 +102,9 @@ def beta_p_jax(shape, average_pressure):
         * epsilon**2
         * R_0**2
         * (1.0 + kappa**2)
+        * 1e6
         * average_pressure
-        / (mu_0 * I**2)
+        / (MU_0 * I**2)
     )
 
 
@@ -117,13 +117,13 @@ def q_star_jax(shape):
         * epsilon**2
         * R_0**2
         * B_0
-        / (mu_0 * R_0 * I)
+        / (MU_0 * R_0 * I)
         * ((1.0 + kappa**2) / 2.0)
     )
 
 
 def beta_t_jax(shape, p_0=DEFAULT_P_0, A=DEFAULT_A, N=DEFAULT_N):
-    """Toroidal beta from the new beta_p and q_* definitions."""
+    """Toroidal beta matching pressure_utils.beta_toroidal_updated."""
     epsilon, kappa, _ = shape
     average_pressure = average_pressure_jax(shape, p_0=p_0, A=A, N=N)
     beta_p = beta_p_jax(shape, average_pressure)
@@ -147,6 +147,15 @@ def shape_is_valid(shape):
     )
 
 
+def clip_shape_to_bounds(shape):
+    """Clamp SciPy boundary roundoff back inside the declared parameter bounds."""
+    clipped = np.asarray(shape, dtype=float).copy()
+    for index, name in enumerate(PARAMETER_NAMES):
+        low, high = PARAMETER_BOUNDS[name]
+        clipped[index] = np.clip(clipped[index], low, high)
+    return clipped
+
+
 def beta_t_from_shape(shape, p_0=DEFAULT_P_0, A=DEFAULT_A, N=DEFAULT_N):
     """Evaluate the new toroidal beta from ordinary NumPy values."""
     shape = np.asarray(shape, dtype=float)
@@ -159,6 +168,18 @@ def beta_t_from_shape(shape, p_0=DEFAULT_P_0, A=DEFAULT_A, N=DEFAULT_N):
             A=float(A),
             N=int(N),
         )
+    except (ArithmeticError, ValueError, np.linalg.LinAlgError):
+        return np.nan
+    return float(value)
+
+
+def volume_from_shape(shape, point_count=DEFAULT_VOLUME_POINTS):
+    """Evaluate volume from ordinary NumPy values using the updated bounds."""
+    shape = np.asarray(shape, dtype=float)
+    if not shape_is_valid(shape):
+        return np.nan
+    try:
+        value = volume_jax(jnp.asarray(shape, dtype=jnp.float64), int(point_count))
     except (ArithmeticError, ValueError, np.linalg.LinAlgError):
         return np.nan
     return float(value)
@@ -210,7 +231,8 @@ def optimize_shape(
     path = [start_shape.copy()]
 
     negative_objective_with_gradient = jax.value_and_grad(
-        lambda shape: -beta_t_jax(
+        lambda shape: -SLSQP_OBJECTIVE_SCALE
+        * beta_t_jax(
             shape,
             p_0=float(p_0),
             A=float(A),
@@ -280,7 +302,7 @@ def optimize_shape(
         return gradient
 
     def save_optimizer_step(shape):
-        path.append(np.asarray(shape, dtype=float).copy())
+        path.append(clip_shape_to_bounds(shape))
 
     result = minimize(
         negative_objective_and_gradient,
@@ -304,10 +326,11 @@ def optimize_shape(
         options={"ftol": 1e-8, "maxiter": int(maxiter)},
     )
 
-    if not np.allclose(path[-1], result.x):
-        path.append(np.asarray(result.x, dtype=float).copy())
+    final_shape = clip_shape_to_bounds(result.x)
+    result.x = final_shape
+    if not np.allclose(path[-1], final_shape):
+        path.append(final_shape.copy())
 
-    final_shape = np.asarray(result.x, dtype=float)
     final_volume = volume_from_shape(final_shape, point_count=volume_points)
     final_q_star = q_star_from_shape(final_shape)
 
@@ -386,7 +409,7 @@ def parse_args():
         "--p-0",
         type=float,
         default=DEFAULT_P_0,
-        help="Pressure scale p_0 used in <p> = p_0 Psi / Psi_min.",
+        help="Accepted for CLI compatibility; ignored by the updated beta_t objective.",
     )
     parser.add_argument(
         "--start-epsilon",

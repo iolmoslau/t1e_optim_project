@@ -52,16 +52,19 @@ PARAMETER_LABEL = {
     "delta": "delta",
 }
 
-STARTING_POINT = beta_opt.SEP_SHAPE.copy()
+# STARTING_POINT = beta_opt.SEP_SHAPE.copy()
+STARTING_POINT = np.array([0.275, 1.35, 0.00], dtype=float)
 DEFAULT_PLOT_RANGES = {
-    "epsilon": (0.10, 0.60),
-    "kappa": (1.00, 2.30),
-    "delta": (-0.80, 0.80),
+    "epsilon": (0.10, 0.90),
+    "kappa": (0.50, 4.50),
+    "delta": (-0.70, 0.80),
 }
 
-DEFAULT_N = 60
+DEFAULT_N = 500
 DEFAULT_GRID_SIZE = 20
-DEFAULT_OUTPUT_DIR = Path("landscape_new_beta_t_output")
+DEFAULT_OUTPUT_DIR = Path("optimal_JAX/output/landscape_new_beta_t_output")
+DEFAULT_OUTPUT_FILE = "landscape_new_beta_t.png"
+SLSQP_OBJECTIVE_SCALE = 1
 
 TESTS = {
     "fix-epsilon": {
@@ -104,6 +107,15 @@ def free_values_from_shape(shape, free_names):
     return np.array([shape[PARAMETER_INDEX[name]] for name in free_names], dtype=float)
 
 
+def clip_free_values_to_bounds(free_values, free_names):
+    """Clamp SciPy boundary roundoff back inside the declared parameter bounds."""
+    clipped = np.asarray(free_values, dtype=float).copy()
+    for index, name in enumerate(free_names):
+        low, high = beta_opt.PARAMETER_BOUNDS[name]
+        clipped[index] = np.clip(clipped[index], low, high)
+    return clipped
+
+
 def landscape_shape_is_valid(shape):
     """Return True when a shape is valid for plotting the objective surface."""
     epsilon, kappa, delta = np.asarray(shape, dtype=float)
@@ -112,9 +124,9 @@ def landscape_shape_is_valid(shape):
         np.isfinite(epsilon)
         and np.isfinite(kappa)
         and np.isfinite(delta)
-        and bounds["epsilon"][0] <= epsilon <= bounds["epsilon"][1]
+        and beta_opt.MIN_EPSILON <= epsilon <= beta_opt.MAX_EPSILON
         and bounds["kappa"][0] <= kappa <= bounds["kappa"][1]
-        and bounds["delta"][0] <= delta <= bounds["delta"][1]
+        and beta_opt.MIN_DELTA <= delta <= beta_opt.MAX_DELTA
     )
 
 
@@ -142,6 +154,18 @@ def q_star_landscape_from_shape(shape):
         return np.nan
     try:
         value = beta_opt.q_star_jax(jnp.asarray(shape, dtype=jnp.float64))
+    except (ArithmeticError, ValueError, np.linalg.LinAlgError):
+        return np.nan
+    return float(value)
+
+
+def volume_landscape_from_shape(shape, point_count=beta_opt.DEFAULT_VOLUME_POINTS):
+    """Evaluate volume with the updated beta_t parameter bounds."""
+    shape = np.asarray(shape, dtype=float)
+    if not landscape_shape_is_valid(shape):
+        return np.nan
+    try:
+        value = beta_opt.volume_jax(jnp.asarray(shape, dtype=jnp.float64), int(point_count))
     except (ArithmeticError, ValueError, np.linalg.LinAlgError):
         return np.nan
     return float(value)
@@ -227,11 +251,12 @@ def maximize_two_parameters_with_constraints(
         fixed_value=fixed_value,
     )
     initial_beta_t = beta_opt.beta_t_from_shape(initial_shape, p_0=p_0, A=A, N=N)
-    initial_volume = beta_opt.volume_from_shape(initial_shape, point_count=volume_points)
+    initial_volume = volume_landscape_from_shape(initial_shape, point_count=volume_points)
     initial_q_star = beta_opt.q_star_from_shape(initial_shape)
 
     value_and_gradient = jax.value_and_grad(
-        lambda free_values: -beta_t_for_free_values_jax(
+        lambda free_values: -SLSQP_OBJECTIVE_SCALE
+        * beta_t_for_free_values_jax(
             free_values,
             free_names=free_names,
             fixed_name=fixed_name,
@@ -332,7 +357,7 @@ def maximize_two_parameters_with_constraints(
         return gradient
 
     def remember_step(free_values):
-        path.append(np.asarray(free_values, dtype=float).copy())
+        path.append(clip_free_values_to_bounds(free_values, free_names))
 
     result = minimize(
         loss_and_gradient,
@@ -355,17 +380,19 @@ def maximize_two_parameters_with_constraints(
         callback=remember_step,
         options={"ftol": 1e-8, "maxiter": int(maxiter)},
     )
-    if not np.allclose(path[-1], result.x):
-        path.append(np.asarray(result.x, dtype=float).copy())
+    final_free_values = clip_free_values_to_bounds(result.x, free_names)
+    result.x = final_free_values
+    if not np.allclose(path[-1], final_free_values):
+        path.append(final_free_values.copy())
 
     final_shape = shape_from_free_values(
-        result.x,
+        final_free_values,
         free_names=free_names,
         fixed_name=fixed_name,
         fixed_value=fixed_value,
     )
     final_beta_t = beta_opt.beta_t_from_shape(final_shape, p_0=p_0, A=A, N=N)
-    final_volume = beta_opt.volume_from_shape(final_shape, point_count=volume_points)
+    final_volume = volume_landscape_from_shape(final_shape, point_count=volume_points)
     final_q_star = beta_opt.q_star_from_shape(final_shape)
 
     return {
@@ -394,11 +421,32 @@ def draw_path(ax, path, label="constrained solve path", color="white"):
         color=color,
         marker="o",
         markeredgecolor="black",
+        markersize=4,
         linewidth=2.0,
         label=label,
+        zorder=4,
     )
-    ax.scatter(path[0, 0], path[0, 1], color="lime", edgecolor="black", s=90, label="start")
-    ax.scatter(path[-1, 0], path[-1, 1], color="red", edgecolor="black", s=90, label="finish")
+    ax.scatter(
+        path[0, 0],
+        path[0, 1],
+        color="lime",
+        edgecolor="black",
+        linewidth=1.5,
+        s=120,
+        label="start",
+        zorder=6,
+    )
+    ax.scatter(
+        path[-1, 0],
+        path[-1, 1],
+        marker="X",
+        color="red",
+        edgecolor="black",
+        linewidth=1.2,
+        s=110,
+        label="finish",
+        zorder=7,
+    )
 
 
 def validate_plot_range(name, value_range):
@@ -453,7 +501,7 @@ def landscape_values(
             )
             beta_t[row, column] = beta_t_landscape_from_shape(shape, p_0=p_0, A=A, N=N)
             volume_error[row, column] = (
-                beta_opt.volume_from_shape(shape, point_count=volume_points) - target_volume
+                volume_landscape_from_shape(shape, point_count=volume_points) - target_volume
             )
             q_star_margin[row, column] = (
                 q_star_landscape_from_shape(shape) - beta_opt.MIN_Q_STAR
@@ -468,18 +516,19 @@ def contour_crosses_zero(values):
     return finite_values.size and np.min(finite_values) <= 0.0 <= np.max(finite_values)
 
 
-def plot_landscape(
+def draw_landscape_panel(
+    fig,
+    ax,
     test_name,
     run,
     grid_size,
-    output_dir,
     plot_ranges,
     p_0,
     A,
     N,
     volume_points,
 ):
-    """Plot one beta_t landscape, constraints, and solve path."""
+    """Draw one beta_t landscape, constraints, and solve path on an axis."""
     test = TESTS[test_name]
     x_name, y_name = run["free_names"]
     path = run["path"]
@@ -497,10 +546,6 @@ def plot_landscape(
         N=N,
         volume_points=volume_points,
     )
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / test["output"]
-    fig, ax = plt.subplots(figsize=(8.0, 6.0), constrained_layout=True)
 
     finite_beta_t = beta_t[np.isfinite(beta_t)]
     if finite_beta_t.size == 0:
@@ -568,6 +613,44 @@ def plot_landscape(
     handles.extend(legend_handles)
     labels.extend(legend_labels)
     ax.legend(handles, labels, loc="best")
+
+
+def plot_landscapes(
+    runs_by_test_name,
+    grid_size,
+    output_dir,
+    plot_ranges,
+    p_0,
+    A,
+    N,
+    volume_points,
+):
+    """Save selected beta_t landscapes as subplots in one PNG."""
+    test_names = list(runs_by_test_name)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / DEFAULT_OUTPUT_FILE
+    figure_width = max(8.0, 6.0 * len(test_names))
+    fig, axes = plt.subplots(
+        1,
+        len(test_names),
+        figsize=(figure_width, 5.8),
+        constrained_layout=True,
+    )
+    axes = np.atleast_1d(axes)
+
+    for ax, test_name in zip(axes, test_names):
+        draw_landscape_panel(
+            fig,
+            ax,
+            test_name,
+            runs_by_test_name[test_name],
+            grid_size=grid_size,
+            plot_ranges=plot_ranges,
+            p_0=p_0,
+            A=A,
+            N=N,
+            volume_points=volume_points,
+        )
 
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
@@ -674,7 +757,7 @@ def parse_args():
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
-        help="Directory where the three plots are saved.",
+        help="Directory where the combined landscape plot is saved.",
     )
     return parser.parse_args()
 
@@ -704,6 +787,7 @@ def main():
     print(f"  q_* minimum: {beta_opt.MIN_Q_STAR:.8g}")
     print(f"  kappa max:   {beta_opt.MAX_KAPPA:.8g}")
 
+    runs_by_test_name = {}
     for test_name in test_names:
         run = maximize_two_parameters_with_constraints(
             TESTS[test_name],
@@ -714,17 +798,20 @@ def main():
             maxiter=args.maxiter,
             volume_points=args.volume_points,
         )
-        output_path = plot_landscape(
-            test_name,
-            run,
-            grid_size=args.grid_size,
-            output_dir=args.output_dir,
-            plot_ranges=plot_ranges,
-            p_0=args.p_0,
-            A=args.A,
-            N=args.N,
-            volume_points=args.volume_points,
-        )
+        runs_by_test_name[test_name] = run
+
+    output_path = plot_landscapes(
+        runs_by_test_name,
+        grid_size=args.grid_size,
+        output_dir=args.output_dir,
+        plot_ranges=plot_ranges,
+        p_0=args.p_0,
+        A=args.A,
+        N=args.N,
+        volume_points=args.volume_points,
+    )
+
+    for test_name, run in runs_by_test_name.items():
         print_run_summary(test_name, run, output_path, target_volume)
 
 

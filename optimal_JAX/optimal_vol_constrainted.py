@@ -53,14 +53,14 @@ from scipy.optimize import minimize
 PARAMETER_NAMES = ("epsilon", "kappa", "delta")
 
 # Default run: start from a smaller toroid and cap volume at TARGET_SHAPE.
-DEFAULT_STARTING_SHAPE = np.array([0.275, 1.35, 0.0], dtype=float)
+DEFAULT_STARTING_SHAPE = np.array([0.375, 1.7, 0.15], dtype=float)
 TARGET_SHAPE = np.array([0.45, 1.9, 0.0], dtype=float)
 
 DEFAULT_A = -0.05
 DEFAULT_N = 500
 DEFAULT_VOLUME_POINTS = 512
 DEFAULT_MAXITER = 200
-DEFAULT_PLOT = Path("optimal_JAX/output/optimal_constrainted_norm_p_flux_contours.png")
+DEFAULT_PLOT = Path("optimal_JAX/output/optimal_vol_constrainted_norm_p_flux_contours.png")
 DEFAULT_PLOT_GRID_SIZE = 600
 DEFAULT_CONTOUR_COUNT = 20
 DEFAULT_Q = 2.0

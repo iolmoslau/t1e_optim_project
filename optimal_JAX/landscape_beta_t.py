@@ -42,7 +42,7 @@ for source_dir in (ROOT, ROOT / "pressure_integral", ROOT / "ITER_Equilibria"):
     if str(source_dir) not in sys.path:
         sys.path.insert(0, str(source_dir))
 
-from pressure_integral.pressure_utils import beta_toroidal  # noqa: E402
+from pressure_integral.pressure_utils import beta_toroidal_updated  # noqa: E402
 
 
 PARAMETER_NAMES = ("epsilon", "kappa", "delta")
@@ -57,6 +57,11 @@ STARTING_RANGES = {
     "epsilon": (0.10, 0.45),
     "kappa": (1.00, 1.70),
     "delta": (-0.30, 0.30),
+}
+DEFAULT_PLOT_RANGES = {
+    "epsilon": (0.05, 0.50),
+    "kappa": (0.50, 5.00),
+    "delta": (-0.80, 0.80),
 }
 STARTING_POINT = np.array(
     [
@@ -73,6 +78,9 @@ DEFAULT_N = 60
 DEFAULT_GRID_SIZE = 20
 DEFAULT_MAXITER = 200
 DEFAULT_OUTPUT_DIR = Path("./optimal_JAX/output/landscape_beta_t_output")
+DEFAULT_R_0 = 1.85  # m
+DEFAULT_I = 8.7e6  # A
+DEFAULT_B_0 = 12.2  # T
 FINITE_DIFFERENCE_STEPS = np.array([1e-4, 1e-4, 1e-4], dtype=float)
 BAD_OBJECTIVE_VALUE = 1e100
 POSITIVE_PARAMETER_FLOOR = 1e-6
@@ -103,10 +111,13 @@ def beta_toroidal_from_shape(shape, A=DEFAULT_A, method=DEFAULT_METHOD, N=DEFAUL
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
-            value = beta_toroidal(
+            value = beta_toroidal_updated(
                 float(epsilon),
                 float(kappa),
                 float(delta),
+                R_0=DEFAULT_R_0,
+                I=DEFAULT_I,
+                B_0=DEFAULT_B_0,
                 A=float(A),
                 N=int(N),
             )
@@ -300,8 +311,8 @@ def draw_path(ax, path, label="optimizer path", color="white"):
 
 def plot_range_for_path(name, path_values, padding_fraction=0.05):
     """Use the configured range, expanded enough to include the full path."""
-    starting_low, starting_high = STARTING_RANGES[name]
-    low, high = starting_low, starting_high
+    plot_low, plot_high = DEFAULT_PLOT_RANGES[name]
+    low, high = plot_low, plot_high
     finite_path = np.asarray(path_values, dtype=float)
     finite_path = finite_path[np.isfinite(finite_path)]
     if finite_path.size:
@@ -310,7 +321,7 @@ def plot_range_for_path(name, path_values, padding_fraction=0.05):
         low = min(low, path_low)
         high = max(high, path_high)
     else:
-        path_low = starting_low
+        path_low = plot_low
 
     width = high - low
     if width <= 0:
@@ -319,8 +330,8 @@ def plot_range_for_path(name, path_values, padding_fraction=0.05):
 
     high = high + padding
     if name in ("epsilon", "kappa") and path_low > 0:
-        if path_low >= starting_low:
-            low = starting_low
+        if path_low >= plot_low:
+            low = plot_low
         else:
             low = max(path_low / (1.0 + padding_fraction), 1e-6)
     else:
@@ -383,13 +394,17 @@ def plot_landscape(test_name, run, grid_size, output_dir, A, method, N):
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / test["output"]
     fig, ax = plt.subplots(figsize=(8.0, 6.0), constrained_layout=True)
+    ax.set_facecolor("#d9d9d9")
 
     finite_Z = Z[np.isfinite(Z)]
     if finite_Z.size == 0:
         ax.text(0.5, 0.5, "No finite toroidal beta values", ha="center", va="center")
     else:
-        filled = ax.contourf(x_values, y_values, Z, levels=35, cmap="viridis")
-        lines = ax.contour(x_values, y_values, Z, levels=12, colors="black", alpha=0.25)
+        cmap = plt.get_cmap("viridis").copy()
+        cmap.set_bad("#d9d9d9")
+        masked_Z = np.ma.masked_invalid(Z)
+        filled = ax.contourf(x_values, y_values, masked_Z, levels=35, cmap=cmap)
+        lines = ax.contour(x_values, y_values, masked_Z, levels=12, colors="black", alpha=0.25)
         ax.clabel(lines, inline=True, fontsize=8)
         fig.colorbar(filled, ax=ax, label="toroidal beta")
 
@@ -451,7 +466,7 @@ def parse_args():
         "--N",
         type=int,
         default=DEFAULT_N,
-        help="Grid resolution passed to beta_toroidal.",
+        help="Grid resolution passed to beta_toroidal_updated.",
     )
     parser.add_argument(
         "--maxiter",
@@ -463,13 +478,13 @@ def parse_args():
         "--A",
         type=float,
         default=DEFAULT_A,
-        help="A parameter passed to beta_toroidal.",
+        help="A parameter passed to beta_toroidal_updated.",
     )
     parser.add_argument(
         "--method",
         choices=("contour", "masking"),
         default=DEFAULT_METHOD,
-        help="Accepted to mirror optimal_norm_p.py; beta_toroidal uses contour evaluation internally.",
+        help="Accepted to mirror optimal_norm_p.py; beta_toroidal_updated uses contour evaluation internally.",
     )
     parser.add_argument(
         "--output-dir",

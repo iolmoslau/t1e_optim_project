@@ -32,7 +32,7 @@ from sklearn.utils._tags import default_tags
 from skopt import dummy_minimize, forest_minimize, gbrt_minimize, gp_minimize
 from skopt.learning.gbrt import GradientBoostingQuantileRegressor
 from skopt.space import Real
-from pressure_integral.pressure_utils import _normalized_psi_pressure as normalized_psi_pressure
+from pressure_integral.pressure_utils import normalized_psi_pressure
 
 # Fix scikit-optimize GBRT compatibility with newer scikit-learn tag handling.
 GradientBoostingQuantileRegressor.__sklearn_tags__ = lambda self: default_tags(self)
