@@ -497,7 +497,7 @@ def draw_landscape_panel(
     if finite_beta_t.size == 0:
         ax.text(0.5, 0.5, "No finite beta_t values", ha="center", va="center")
     else:
-        filled = ax.contourf(x_values, y_values, beta_t, levels=35, cmap="viridis")
+        filled = ax.contourf(x_values, y_values, beta_t, levels=35, cmap="plasma")
         lines = ax.contour(x_values, y_values, beta_t, levels=12, colors="black", alpha=0.25)
         ax.clabel(lines, inline=True, fontsize=8)
         fig.colorbar(filled, ax=ax, label="beta_t")

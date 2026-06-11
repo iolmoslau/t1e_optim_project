@@ -13,12 +13,15 @@ import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+PRESSURE_DIR = REPO_ROOT / "pressure_integral"
+ITER_DIR = REPO_ROOT / "ITER_Equilibria"
+for path in (REPO_ROOT, PRESSURE_DIR, ITER_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "matplotlib"))
 
-from optimal_JAX.utils_JAX import DEFAULT_A, make_psi
+from pressure_integral.pressure_utils import DEFAULT_A, plot_plasma_profile
 
 
 DEFAULT_GRID_SIZE = 600
@@ -80,52 +83,25 @@ def plot_contour_from_shape(
     dpi: int = DEFAULT_DPI,
     show: bool = False,
 ) -> Path:
-    """Save a PNG contour plot for the requested shape."""
-    import matplotlib.cm as cm
-    import matplotlib.colors as mcolors
-    import matplotlib.ticker as mticker
-
+    """Save a PNG normalized pressure contour plot for the requested shape."""
     epsilon, kappa, delta = validate_shape(epsilon, kappa, delta)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    psi, _, _ = make_psi(epsilon, kappa, delta, float(A))
-
-    x = np.linspace(1.0 - epsilon - 0.1, 1.0 + epsilon + 0.1, int(grid_size))
-    y = np.linspace(-kappa * epsilon - 0.1, kappa * epsilon + 0.1, int(grid_size))
-    X, Y = np.meshgrid(x, y)
-    Z = np.asarray(psi(X, Y), dtype=float)
-
-    if not np.isfinite(Z).any():
-        raise ValueError("psi grid has no finite values; check the shape parameters")
-
-    interior = np.where(Z <= 0.0, Z, np.nan)
-    negative_psi = Z[np.isfinite(Z) & (Z < 0.0)]
-    if negative_psi.size == 0:
-        raise ValueError("psi grid has no finite negative values; check the shape parameters")
-
-    psi_min = float(np.min(negative_psi))
-    contour_levels = np.linspace(psi_min, 0.0, int(contour_count))
-
     plt = configure_pyplot(show)
-    fig, ax = plt.subplots(figsize=(4.2, 4.3))
-    fig.subplots_adjust(left=0.13, right=0.76, top=0.93, bottom=0.11)
-
-    ax.contour(X, Y, interior, levels=contour_levels, cmap="plasma")
-    ax.set_aspect("equal")
-    ax.set_xlabel(r"$R/R_0$")
-    ax.set_ylabel(r"$Z/R_0$")
-    ax.set_title(
-        rf"$\epsilon={epsilon:.3f},\;\kappa={kappa:.3f},\;\delta={delta:.3f}$",
-        fontsize=9,
+    ax = plot_plasma_profile(
+        epsilon,
+        kappa,
+        delta,
+        A=float(A),
+        N=int(grid_size),
+        n_levels=int(contour_count)
     )
-    ax.xaxis.set_major_locator(mticker.MaxNLocator(3))
-
-    norm = mcolors.Normalize(vmin=psi_min, vmax=0.0)
-    sm = cm.ScalarMappable(cmap="plasma", norm=norm)
-    sm.set_array([])
-    cax = fig.add_axes((0.79, 0.11, 0.03, 0.82))
-    fig.colorbar(sm, cax=cax, label=r"$\psi$")
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    fig = ax.get_figure()
 
     fig.savefig(output_path, dpi=int(dpi), format="png")
     if show:

@@ -58,6 +58,7 @@ from optimal_JAX.utils_JAX import (
     average_pressure_updated_jax as utils_average_pressure_updated_jax,
     beta_poloidal_updated_jax as utils_beta_poloidal_updated_jax,
     beta_toroidal_updated_jax as utils_beta_toroidal_updated_jax,
+    normalized_psi_pressure as utils_normalized_psi_pressure,
     q_star_updated_jax as utils_q_star_updated_jax,
     volume_jax as utils_volume_jax,
 )
@@ -160,6 +161,18 @@ def beta_t_from_shape(shape, p_0=DEFAULT_P_0, A=DEFAULT_A, N=DEFAULT_N):
             A=float(A),
             N=int(N),
         )
+    except (ArithmeticError, ValueError, np.linalg.LinAlgError):
+        return np.nan
+    return float(value)
+
+
+def normalized_psi_pressure_from_shape(shape, A=DEFAULT_A, N=DEFAULT_N):
+    """Evaluate normalized_psi_pressure from ordinary NumPy values."""
+    shape = np.asarray(shape, dtype=float)
+    if not shape_is_valid(shape):
+        return np.nan
+    try:
+        value = utils_normalized_psi_pressure(*shape, A=A, N=N)
     except (ArithmeticError, ValueError, np.linalg.LinAlgError):
         return np.nan
     return float(value)
@@ -336,6 +349,9 @@ def optimize_shape(
         "target_volume": target_volume,
         "final_shape": final_shape,
         "final_beta_t": beta_t_from_shape(final_shape, p_0=p_0, A=A, N=N),
+        "final_normalized_psi_pressure": normalized_psi_pressure_from_shape(
+            final_shape, A=A, N=N
+        ),
         "final_volume": final_volume,
         "final_volume_margin": target_volume - final_volume,
         "final_q_star": final_q_star,
@@ -356,6 +372,7 @@ def print_summary(run):
     print_shape("final shape", run["final_shape"])
     print(f"starting beta_t: {run['initial_beta_t']:.8g}")
     print(f"final beta_t: {run['final_beta_t']:.8g}")
+    print(f"final normalized_psi_pressure: {run['final_normalized_psi_pressure']:.8g}")
     print(f"V_sep: {run['target_volume']:.8g}")
     print(f"starting volume: {run['initial_volume']:.8g}")
     print(f"final volume: {run['final_volume']:.8g}")
