@@ -1,38 +1,20 @@
 #!/usr/bin/env python3
-"""Constrained beta_t landscapes for the new beta_t objective.
-
-This mirrors landscape_constrainted.py:
-
-1. Fix epsilon, optimize kappa and delta, then plot kappa-delta.
-2. Fix kappa, optimize epsilon and delta, then plot epsilon-delta.
-3. Fix delta, optimize epsilon and kappa, then plot epsilon-kappa.
-
-The optimization problem is
-
-    maximize beta_t(shape)
-    subject to volume(shape) = V_sep
-               q_*(shape) >= 2
-               kappa <= 2.1
-
-where V_sep is the volume of (epsilon_sep, kappa_sep, delta_sep) from
-optimal_new_beta_t.py.
-"""
+"""Updated beta_t landscapes matching optimal_beta_t_updated.py."""
 
 from __future__ import annotations
 
 import argparse
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "matplotlib"))
 
 import numpy as np
+from jax import config
 
-try:
-    from optimal_JAX import optimal_new_beta_t as beta_opt
-except ModuleNotFoundError:
-    import optimal_new_beta_t as beta_opt
+config.update("jax_enable_x64", True)
 
 import jax
 import jax.numpy as jnp
@@ -43,6 +25,13 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from scipy.optimize import minimize
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from optimal_JAX import optimal_beta_t_updated as beta_opt  # noqa: E402
+
 
 PARAMETER_NAMES = beta_opt.PARAMETER_NAMES
 PARAMETER_INDEX = {name: index for index, name in enumerate(PARAMETER_NAMES)}
@@ -52,18 +41,10 @@ PARAMETER_LABEL = {
     "delta": "delta",
 }
 
-# STARTING_POINT = beta_opt.SEP_SHAPE.copy()
-STARTING_POINT = np.array([0.275, 1.35, 0.00], dtype=float)
-DEFAULT_PLOT_RANGES = {
-    "epsilon": (0.10, 0.90),
-    "kappa": (0.50, 4.50),
-    "delta": (-0.70, 0.80),
-}
-
-DEFAULT_N = 500
-DEFAULT_GRID_SIZE = 20
-DEFAULT_OUTPUT_DIR = Path("optimal_JAX/output/landscape_new_beta_t_output")
-DEFAULT_OUTPUT_FILE = "landscape_new_beta_t.png"
+STARTING_POINT = np.array([0.275, 1.35, 0.0], dtype=float)
+DEFAULT_GRID_SIZE = 40
+DEFAULT_OUTPUT_DIR = Path("optimal_JAX/output/landscape_beta_t_update_output")
+DEFAULT_OUTPUT_FILE = "landscape_beta_t_update.png"
 SLSQP_OBJECTIVE_SCALE = 1
 
 TESTS = {
@@ -83,6 +64,21 @@ TESTS = {
         "output": "fix_delta_epsilon_kappa.png",
     },
 }
+
+
+def default_plot_ranges():
+    """Return the per-script forced landscape ranges."""
+    MIN_KAPPA = 0.5
+    MAX_KAPPA = 4.1
+    MIN_EPSILON = 0.1
+    MAX_EPSILON = 0.90
+    MIN_DELTA = -0.70
+    MAX_DELTA = 0.80
+    return {
+        "epsilon": (MIN_EPSILON, MAX_EPSILON),
+        "kappa": (MIN_KAPPA, MAX_KAPPA),
+        "delta": (MIN_DELTA, MAX_DELTA),
+    }
 
 
 def shape_from_free_values(free_values, free_names, fixed_name, fixed_value):
@@ -108,7 +104,7 @@ def free_values_from_shape(shape, free_names):
 
 
 def clip_free_values_to_bounds(free_values, free_names):
-    """Clamp SciPy boundary roundoff back inside the declared parameter bounds."""
+    """Clamp SciPy boundary roundoff back inside the optimizer bounds."""
     clipped = np.asarray(free_values, dtype=float).copy()
     for index, name in enumerate(free_names):
         low, high = beta_opt.PARAMETER_BOUNDS[name]
@@ -117,21 +113,26 @@ def clip_free_values_to_bounds(free_values, free_names):
 
 
 def landscape_shape_is_valid(shape):
-    """Return True when a shape is valid for plotting the objective surface."""
+    """Return True when a shape is finite inside the forced plot range."""
     epsilon, kappa, delta = np.asarray(shape, dtype=float)
-    bounds = beta_opt.BASE_PARAMETER_BOUNDS
+    plot_ranges = default_plot_ranges()
     return (
         np.isfinite(epsilon)
         and np.isfinite(kappa)
         and np.isfinite(delta)
-        and beta_opt.MIN_EPSILON <= epsilon <= beta_opt.MAX_EPSILON
-        and bounds["kappa"][0] <= kappa <= bounds["kappa"][1]
-        and beta_opt.MIN_DELTA <= delta <= beta_opt.MAX_DELTA
+        and plot_ranges["epsilon"][0] <= epsilon <= plot_ranges["epsilon"][1]
+        and plot_ranges["kappa"][0] <= kappa <= plot_ranges["kappa"][1]
+        and plot_ranges["delta"][0] <= delta <= plot_ranges["delta"][1]
     )
 
 
-def beta_t_landscape_from_shape(shape, p_0=beta_opt.DEFAULT_P_0, A=beta_opt.DEFAULT_A, N=DEFAULT_N):
-    """Evaluate beta_t for plotting without applying optimizer-only constraints."""
+def beta_t_landscape_from_shape(
+    shape,
+    p_0=beta_opt.DEFAULT_P_0,
+    A=beta_opt.DEFAULT_A,
+    N=beta_opt.DEFAULT_N,
+):
+    """Evaluate beta_t over the forced landscape range."""
     shape = np.asarray(shape, dtype=float)
     if not landscape_shape_is_valid(shape):
         return np.nan
@@ -148,7 +149,7 @@ def beta_t_landscape_from_shape(shape, p_0=beta_opt.DEFAULT_P_0, A=beta_opt.DEFA
 
 
 def q_star_landscape_from_shape(shape):
-    """Evaluate q_* for plotting without applying optimizer-only constraints."""
+    """Evaluate q_* over the forced landscape range."""
     shape = np.asarray(shape, dtype=float)
     if not landscape_shape_is_valid(shape):
         return np.nan
@@ -160,7 +161,7 @@ def q_star_landscape_from_shape(shape):
 
 
 def volume_landscape_from_shape(shape, point_count=beta_opt.DEFAULT_VOLUME_POINTS):
-    """Evaluate volume with the updated beta_t parameter bounds."""
+    """Evaluate volume over the forced landscape range."""
     shape = np.asarray(shape, dtype=float)
     if not landscape_shape_is_valid(shape):
         return np.nan
@@ -171,15 +172,7 @@ def volume_landscape_from_shape(shape, point_count=beta_opt.DEFAULT_VOLUME_POINT
     return float(value)
 
 
-def beta_t_for_free_values_jax(
-    free_values,
-    free_names,
-    fixed_name,
-    fixed_value,
-    p_0,
-    A,
-    N,
-):
+def beta_t_for_free_values_jax(free_values, free_names, fixed_name, fixed_value, p_0, A, N):
     """beta_t as a function of only the two free variables."""
     shape = shape_from_free_values_jax(
         free_values,
@@ -212,12 +205,7 @@ def volume_margin_for_free_values_jax(
     )
 
 
-def q_star_margin_for_free_values_jax(
-    free_values,
-    free_names,
-    fixed_name,
-    fixed_value,
-):
+def q_star_margin_for_free_values_jax(free_values, free_names, fixed_name, fixed_value):
     """Positive when q_* satisfies the lower bound."""
     shape = shape_from_free_values_jax(
         free_values,
@@ -233,11 +221,11 @@ def maximize_two_parameters_with_constraints(
     target_volume,
     p_0=beta_opt.DEFAULT_P_0,
     A=beta_opt.DEFAULT_A,
-    N=DEFAULT_N,
+    N=beta_opt.DEFAULT_N,
     maxiter=beta_opt.DEFAULT_MAXITER,
     volume_points=beta_opt.DEFAULT_VOLUME_POINTS,
 ):
-    """Maximize beta_t while enforcing the new volume and q_* constraints."""
+    """Maximize beta_t while enforcing the updated volume and q_* constraints."""
     fixed_name = test["fixed"]
     free_names = test["free"]
     fixed_value = STARTING_POINT[PARAMETER_INDEX[fixed_name]]
@@ -294,14 +282,12 @@ def maximize_two_parameters_with_constraints(
         )
         if not beta_opt.shape_is_valid(trial_shape):
             return beta_opt.BAD_OBJECTIVE_VALUE, np.zeros(2, dtype=float)
-
         try:
             value, gradient = value_and_gradient(jnp.asarray(free_values, dtype=jnp.float64))
             value = float(value)
             gradient = np.asarray(gradient, dtype=float)
         except Exception:
             return beta_opt.BAD_OBJECTIVE_VALUE, np.zeros(2, dtype=float)
-
         if not np.isfinite(value) or not np.all(np.isfinite(gradient)):
             return beta_opt.BAD_OBJECTIVE_VALUE, np.zeros(2, dtype=float)
         return value, gradient
@@ -413,40 +399,21 @@ def maximize_two_parameters_with_constraints(
     }
 
 
-def draw_path(ax, path, label="constrained solve path", color="white"):
+def draw_path(ax, path):
     """Draw the optimizer path with start and finish markers."""
     ax.plot(
         path[:, 0],
         path[:, 1],
-        color=color,
+        color="white",
         marker="o",
         markeredgecolor="black",
         markersize=4,
         linewidth=2.0,
-        label=label,
+        label="constrained solve path",
         zorder=4,
     )
-    ax.scatter(
-        path[0, 0],
-        path[0, 1],
-        color="lime",
-        edgecolor="black",
-        linewidth=1.5,
-        s=120,
-        label="start",
-        zorder=6,
-    )
-    ax.scatter(
-        path[-1, 0],
-        path[-1, 1],
-        marker="X",
-        color="red",
-        edgecolor="black",
-        linewidth=1.2,
-        s=110,
-        label="finish",
-        zorder=7,
-    )
+    ax.scatter(path[0, 0], path[0, 1], color="lime", edgecolor="black", s=120, label="start", zorder=6)
+    ax.scatter(path[-1, 0], path[-1, 1], marker="X", color="red", edgecolor="black", s=110, label="finish", zorder=7)
 
 
 def validate_plot_range(name, value_range):
@@ -457,40 +424,27 @@ def validate_plot_range(name, value_range):
     return (float(low), float(high))
 
 
-def should_use_log_axis(name, value_range):
-    """Use log spacing when a positive parameter spans a large range."""
-    low, high = value_range
-    return name in ("epsilon", "kappa") and low > 0 and high / low > 20.0
-
-
-def values_for_axis(name, value_range, count):
+def values_for_axis(value_range, count):
     """Build landscape sample points for one plot axis."""
-    if should_use_log_axis(name, value_range):
-        return np.geomspace(value_range[0], value_range[1], int(count))
     return np.linspace(*value_range, int(count))
 
 
-def landscape_values(
-    test,
-    fixed_value,
-    x_range,
-    y_range,
-    grid_size,
-    p_0,
-    A,
-    N,
-    volume_points,
-):
+def contour_crosses_zero(values):
+    """Return True when a finite array spans zero."""
+    finite_values = values[np.isfinite(values)]
+    return finite_values.size and np.min(finite_values) <= 0.0 <= np.max(finite_values)
+
+
+def landscape_values(test, fixed_value, x_range, y_range, grid_size, p_0, A, N, volume_points):
     """Evaluate beta_t, volume error, and q_* margin over the plotted ranges."""
     x_name, y_name = test["free"]
-    x_values = values_for_axis(x_name, x_range, grid_size)
-    y_values = values_for_axis(y_name, y_range, grid_size)
+    x_values = values_for_axis(x_range, grid_size)
+    y_values = values_for_axis(y_range, grid_size)
     beta_t = np.empty((len(y_values), len(x_values)), dtype=float)
     volume_error = np.empty_like(beta_t)
     q_star_margin = np.empty_like(beta_t)
 
     target_volume = beta_opt.sep_volume(point_count=volume_points)
-
     for row, y_value in enumerate(y_values):
         for column, x_value in enumerate(x_values):
             shape = shape_from_free_values(
@@ -506,14 +460,7 @@ def landscape_values(
             q_star_margin[row, column] = (
                 q_star_landscape_from_shape(shape) - beta_opt.MIN_Q_STAR
             )
-
     return x_values, y_values, beta_t, volume_error, q_star_margin
-
-
-def contour_crosses_zero(values):
-    """Return True when a finite array spans zero."""
-    finite_values = values[np.isfinite(values)]
-    return finite_values.size and np.min(finite_values) <= 0.0 <= np.max(finite_values)
 
 
 def draw_landscape_panel(
@@ -531,7 +478,6 @@ def draw_landscape_panel(
     """Draw one beta_t landscape, constraints, and solve path on an axis."""
     test = TESTS[test_name]
     x_name, y_name = run["free_names"]
-    path = run["path"]
     x_range = plot_ranges[x_name]
     y_range = plot_ranges[y_name]
 
@@ -558,19 +504,10 @@ def draw_landscape_panel(
 
     legend_handles = []
     legend_labels = []
-
     if contour_crosses_zero(volume_error):
-        ax.contour(
-            x_values,
-            y_values,
-            volume_error,
-            levels=[0.0],
-            colors="crimson",
-            linewidths=2.5,
-        )
+        ax.contour(x_values, y_values, volume_error, levels=[0.0], colors="crimson", linewidths=2.5)
         legend_handles.append(Line2D([0], [0], color="crimson", linewidth=2.5))
         legend_labels.append("V = V_sep")
-
     if contour_crosses_zero(q_star_margin):
         ax.contour(
             x_values,
@@ -583,7 +520,6 @@ def draw_landscape_panel(
         )
         legend_handles.append(Line2D([0], [0], color="orange", linewidth=2.5, linestyle="--"))
         legend_labels.append("q_* = 2")
-
     if x_name == "kappa" and x_range[0] <= beta_opt.MAX_KAPPA <= x_range[1]:
         ax.axvline(beta_opt.MAX_KAPPA, color="magenta", linewidth=2.0, linestyle=":")
         legend_handles.append(Line2D([0], [0], color="magenta", linewidth=2.0, linestyle=":"))
@@ -593,8 +529,7 @@ def draw_landscape_panel(
         legend_handles.append(Line2D([0], [0], color="magenta", linewidth=2.0, linestyle=":"))
         legend_labels.append("kappa = 2.1")
 
-    draw_path(ax, path)
-
+    draw_path(ax, run["path"])
     ax.set_xlabel(PARAMETER_LABEL[x_name])
     ax.set_ylabel(PARAMETER_LABEL[y_name])
     ax.set_title(
@@ -603,10 +538,6 @@ def draw_landscape_panel(
     )
     ax.set_xlim(x_range)
     ax.set_ylim(y_range)
-    if should_use_log_axis(x_name, x_range):
-        ax.set_xscale("log")
-    if should_use_log_axis(y_name, y_range):
-        ax.set_yscale("log")
     ax.grid(True, color="white", alpha=0.15)
 
     handles, labels = ax.get_legend_handles_labels()
@@ -615,29 +546,18 @@ def draw_landscape_panel(
     ax.legend(handles, labels, loc="best")
 
 
-def plot_landscapes(
-    runs_by_test_name,
-    grid_size,
-    output_dir,
-    plot_ranges,
-    p_0,
-    A,
-    N,
-    volume_points,
-):
+def plot_landscapes(runs_by_test_name, grid_size, output_dir, plot_ranges, p_0, A, N, volume_points):
     """Save selected beta_t landscapes as subplots in one PNG."""
     test_names = list(runs_by_test_name)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / DEFAULT_OUTPUT_FILE
-    figure_width = max(8.0, 6.0 * len(test_names))
     fig, axes = plt.subplots(
         1,
         len(test_names),
-        figsize=(figure_width, 5.8),
+        figsize=(max(8.0, 6.0 * len(test_names)), 5.8),
         constrained_layout=True,
     )
     axes = np.atleast_1d(axes)
-
     for ax, test_name in zip(axes, test_names):
         draw_landscape_panel(
             fig,
@@ -651,7 +571,28 @@ def plot_landscapes(
             N=N,
             volume_points=volume_points,
         )
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+    return output_path
 
+
+def plot_landscape(test_name, run, grid_size, output_dir, plot_ranges, p_0, A, N, volume_points):
+    """Save one beta_t landscape, constraints, and solve path as its own PNG."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / TESTS[test_name]["output"]
+    fig, ax = plt.subplots(figsize=(8.0, 6.0), constrained_layout=True)
+    draw_landscape_panel(
+        fig,
+        ax,
+        test_name,
+        run,
+        grid_size=grid_size,
+        plot_ranges=plot_ranges,
+        p_0=p_0,
+        A=A,
+        N=N,
+        volume_points=volume_points,
+    )
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
     return output_path
@@ -684,80 +625,25 @@ def print_run_summary(test_name, run, output_path, target_volume):
 
 
 def parse_args():
+    plot_ranges = default_plot_ranges()
     parser = argparse.ArgumentParser(
-        description="Plot constrained beta_t landscapes and optimizer paths."
+        description="Plot updated beta_t landscapes and optimizer paths."
     )
+    parser.add_argument("--test", choices=("all", *TESTS.keys()), default="all")
+    parser.add_argument("--grid-size", type=int, default=DEFAULT_GRID_SIZE)
+    parser.add_argument("--epsilon-range", type=float, nargs=2, default=plot_ranges["epsilon"])
+    parser.add_argument("--kappa-range", type=float, nargs=2, default=plot_ranges["kappa"])
+    parser.add_argument("--delta-range", type=float, nargs=2, default=plot_ranges["delta"])
+    parser.add_argument("--N", type=int, default=beta_opt.DEFAULT_N)
+    parser.add_argument("--volume-points", type=int, default=beta_opt.DEFAULT_VOLUME_POINTS)
+    parser.add_argument("--maxiter", type=int, default=beta_opt.DEFAULT_MAXITER)
+    parser.add_argument("--A", type=float, default=beta_opt.DEFAULT_A)
+    parser.add_argument("--p-0", type=float, default=beta_opt.DEFAULT_P_0)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument(
-        "--test",
-        choices=("all", *TESTS.keys()),
-        default="all",
-        help="Which fixed-parameter test to run.",
-    )
-    parser.add_argument(
-        "--grid-size",
-        type=int,
-        default=DEFAULT_GRID_SIZE,
-        help="Number of landscape samples along each plotted axis.",
-    )
-    parser.add_argument(
-        "--epsilon-range",
-        type=float,
-        nargs=2,
-        metavar=("LOW", "HIGH"),
-        default=DEFAULT_PLOT_RANGES["epsilon"],
-        help="Plot range to use whenever epsilon is an axis.",
-    )
-    parser.add_argument(
-        "--kappa-range",
-        type=float,
-        nargs=2,
-        metavar=("LOW", "HIGH"),
-        default=DEFAULT_PLOT_RANGES["kappa"],
-        help="Plot range to use whenever kappa is an axis.",
-    )
-    parser.add_argument(
-        "--delta-range",
-        type=float,
-        nargs=2,
-        metavar=("LOW", "HIGH"),
-        default=DEFAULT_PLOT_RANGES["delta"],
-        help="Plot range to use whenever delta is an axis.",
-    )
-    parser.add_argument(
-        "--N",
-        type=int,
-        default=DEFAULT_N,
-        help="Grid resolution for the local JAX beta_t pressure average.",
-    )
-    parser.add_argument(
-        "--volume-points",
-        type=int,
-        default=beta_opt.DEFAULT_VOLUME_POINTS,
-        help="Number of boundary points used for the volume calculation.",
-    )
-    parser.add_argument(
-        "--maxiter",
-        type=int,
-        default=beta_opt.DEFAULT_MAXITER,
-        help="Maximum SLSQP iterations for each constrained solve.",
-    )
-    parser.add_argument(
-        "--A",
-        type=float,
-        default=beta_opt.DEFAULT_A,
-        help="A parameter used by the local flux calculation.",
-    )
-    parser.add_argument(
-        "--p-0",
-        type=float,
-        default=beta_opt.DEFAULT_P_0,
-        help="Pressure scale p_0 used in <p> = p_0 Psi / Psi_min.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help="Directory where the combined landscape plot is saved.",
+        "--plot-layout",
+        choices=("subplots", "separate"),
+        default="subplots",
     )
     return parser.parse_args()
 
@@ -800,19 +686,33 @@ def main():
         )
         runs_by_test_name[test_name] = run
 
-    output_path = plot_landscapes(
-        runs_by_test_name,
-        grid_size=args.grid_size,
-        output_dir=args.output_dir,
-        plot_ranges=plot_ranges,
-        p_0=args.p_0,
-        A=args.A,
-        N=args.N,
-        volume_points=args.volume_points,
-    )
-
-    for test_name, run in runs_by_test_name.items():
-        print_run_summary(test_name, run, output_path, target_volume)
+    if args.plot_layout == "subplots":
+        output_path = plot_landscapes(
+            runs_by_test_name,
+            grid_size=args.grid_size,
+            output_dir=args.output_dir,
+            plot_ranges=plot_ranges,
+            p_0=args.p_0,
+            A=args.A,
+            N=args.N,
+            volume_points=args.volume_points,
+        )
+        for test_name, run in runs_by_test_name.items():
+            print_run_summary(test_name, run, output_path, target_volume)
+    else:
+        for test_name, run in runs_by_test_name.items():
+            output_path = plot_landscape(
+                test_name,
+                run,
+                grid_size=args.grid_size,
+                output_dir=args.output_dir,
+                plot_ranges=plot_ranges,
+                p_0=args.p_0,
+                A=args.A,
+                N=args.N,
+                volume_points=args.volume_points,
+            )
+            print_run_summary(test_name, run, output_path, target_volume)
 
 
 if __name__ == "__main__":

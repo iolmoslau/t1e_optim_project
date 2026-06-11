@@ -20,7 +20,7 @@ OUTPUT_ROOT = SCRIPT_DIR / "output"
 DEFAULT_OUTPUT = OUTPUT_ROOT / "plot2x3.png"
 
 ROWS = (
-    ("landscape_beta_t_output", "beta_t landscape"),
+    ("landscape_beta_t_update_output", "beta_t landscape"),
     ("optimal_norm_p_output", "normalized pressure"),
 )
 COLUMNS = (

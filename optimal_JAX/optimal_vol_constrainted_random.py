@@ -7,20 +7,36 @@ import argparse
 
 import numpy as np
 
-from optimal_vol_constrainted import (
-    BETA_T_ALT_OBJECTIVE,
-    BETA_T_OBJECTIVE,
-    DEFAULT_A,
-    DEFAULT_MAXITER,
-    DEFAULT_N,
-    DEFAULT_VOLUME_POINTS,
-    NORMALIZED_OBJECTIVE,
-    PARAMETER_BOUNDS,
-    TARGET_SHAPE,
-    objective_label,
-    optimize_shape,
-    volume_from_shape,
-)
+try:
+    from optimal_JAX.optimal_vol_constrainted import (
+        BETA_T_ALT_OBJECTIVE,
+        BETA_T_OBJECTIVE,
+        DEFAULT_A,
+        DEFAULT_MAXITER,
+        DEFAULT_N,
+        DEFAULT_VOLUME_POINTS,
+        NORMALIZED_OBJECTIVE,
+        PARAMETER_BOUNDS,
+        TARGET_SHAPE,
+        objective_label,
+        optimize_shape,
+        volume_from_shape,
+    )
+except ModuleNotFoundError:
+    from optimal_vol_constrainted import (
+        BETA_T_ALT_OBJECTIVE,
+        BETA_T_OBJECTIVE,
+        DEFAULT_A,
+        DEFAULT_MAXITER,
+        DEFAULT_N,
+        DEFAULT_VOLUME_POINTS,
+        NORMALIZED_OBJECTIVE,
+        PARAMETER_BOUNDS,
+        TARGET_SHAPE,
+        objective_label,
+        optimize_shape,
+        volume_from_shape,
+    )
 
 BETA_T_UPDATED_OBJECTIVE = "beta_t_updated"
 

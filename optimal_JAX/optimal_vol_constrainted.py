@@ -14,7 +14,7 @@ The target volume comes from this reference elliptical toroid:
 
 The file has three layers:
 
-1. Solov'ev formulas turn a shape into flux, pressure, and volume.
+1. Shared JAX helpers turn a shape into pressure and volume scores.
 2. Small wrapper functions choose which objective to score.
 3. optimize_shape asks SciPy SLSQP to improve the shape without exceeding
    the target volume.
@@ -26,11 +26,8 @@ The optimizer code below uses plainer names because that is the main workflow.
 from __future__ import annotations
 
 import argparse
-import os
-import tempfile
+import sys
 from pathlib import Path
-
-os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "matplotlib"))
 
 import numpy as np
 from jax import config
@@ -39,11 +36,20 @@ config.update("jax_enable_x64", True)
 
 import jax
 import jax.numpy as jnp
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 from scipy.optimize import minimize
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from optimal_JAX.plot_contour_from_shape import plot_contour_from_shape  # noqa: E402
+from optimal_JAX.utils_JAX import (  # noqa: E402
+    beta_t_alternative_jax as utils_beta_t_alternative_jax,
+    beta_toroidal_jax as utils_beta_toroidal_jax,
+    normalized_psi_pressure_masking_jax,
+    volume_jax as utils_volume_jax,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -77,301 +83,6 @@ PARAMETER_BOUNDS = {
     "kappa": (0.050001, 12.0),
     "delta": (-0.949, 0.949),
 }
-
-
-# ---------------------------------------------------------------------------
-# Solov'ev flux formulas
-# ---------------------------------------------------------------------------
-
-def safe_log(x):
-    """Logarithm used by the Solov'ev basis."""
-    return jnp.log(jnp.maximum(x, 1e-12))
-
-
-def basis_values(x, y):
-    """Seven homogeneous Solov'ev basis functions."""
-    log_x = safe_log(x)
-    x2 = x * x
-    y2 = y * y
-
-    return jnp.stack(
-        [
-            jnp.ones_like(x),
-            x2,
-            y2 - x2 * log_x,
-            x2 * x2 - 4.0 * x2 * y2,
-            2.0 * y2 * y2
-            - 9.0 * x2 * y2
-            + 3.0 * x2 * x2 * log_x
-            - 12.0 * x2 * y2 * log_x,
-            x2 * x2 * x2 - 12.0 * x2 * x2 * y2 + 8.0 * x2 * y2 * y2,
-            8.0 * y2 * y2 * y2
-            - 140.0 * x2 * y2 * y2
-            + 75.0 * x2 * x2 * y2
-            - 15.0 * x2 * x2 * x2 * log_x
-            + 180.0 * x2 * x2 * y2 * log_x
-            - 120.0 * x2 * y2 * y2 * log_x,
-        ],
-        axis=0,
-    )
-
-
-def particular_value(x, y, A):
-    """Particular Solov'ev solution for source A + (1 - A) * x^2."""
-    del y
-    return A * (0.5 * x * x * safe_log(x)) + (1.0 - A) * (x**4 / 8.0)
-
-
-# These helpers ask JAX for the derivatives used in the boundary equations.
-def basis_x(x, y):
-    return jax.jacfwd(lambda value: basis_values(value, y))(x)
-
-
-def basis_y(x, y):
-    return jax.jacfwd(lambda value: basis_values(x, value))(y)
-
-
-def basis_xx(x, y):
-    return jax.jacfwd(lambda value: basis_x(value, y))(x)
-
-
-def basis_yy(x, y):
-    return jax.jacfwd(lambda value: basis_y(x, value))(y)
-
-
-def particular_x(x, y, A):
-    return jax.grad(lambda value: particular_value(value, y, A))(x)
-
-
-def particular_y(x, y, A):
-    return jax.grad(lambda value: particular_value(x, value, A))(y)
-
-
-def particular_xx(x, y, A):
-    return jax.grad(lambda value: particular_x(value, y, A))(x)
-
-
-def particular_yy(x, y, A):
-    return jax.grad(lambda value: particular_y(x, value, A))(y)
-
-
-def solve_coefficients(epsilon, kappa, delta, A):
-    """Find coefficients that make the flux match the requested boundary."""
-    alpha = jnp.arcsin(delta)
-    curv1 = -((1.0 + alpha) ** 2) / (epsilon * kappa**2)
-    curv2 = -kappa / (epsilon * jnp.cos(alpha) ** 2)
-    curv3 = ((1.0 - alpha) ** 2) / (epsilon * kappa**2)
-
-    x_outer = 1.0 + epsilon
-    x_inner = 1.0 - epsilon
-    x_high = 1.0 - epsilon * delta
-    y_high = kappa * epsilon
-    zero = jnp.array(0.0, dtype=jnp.float64)
-
-    matrix = jnp.stack(
-        [
-            basis_values(x_outer, zero),
-            basis_values(x_inner, zero),
-            basis_values(x_high, y_high),
-            basis_x(x_high, y_high),
-            curv1 * basis_x(x_outer, zero) + basis_yy(x_outer, zero),
-            curv3 * basis_x(x_inner, zero) + basis_yy(x_inner, zero),
-            curv2 * basis_y(x_high, y_high) + basis_xx(x_high, y_high),
-        ]
-    )
-
-    right_hand_side = -jnp.stack(
-        [
-            particular_value(x_outer, zero, A),
-            particular_value(x_inner, zero, A),
-            particular_value(x_high, y_high, A),
-            particular_x(x_high, y_high, A),
-            curv1 * particular_x(x_outer, zero, A) + particular_yy(x_outer, zero, A),
-            curv3 * particular_x(x_inner, zero, A) + particular_yy(x_inner, zero, A),
-            curv2 * particular_y(x_high, y_high, A) + particular_xx(x_high, y_high, A),
-        ]
-    )
-
-    return jnp.linalg.solve(matrix, right_hand_side)
-
-
-# ---------------------------------------------------------------------------
-# Objective and volume calculations
-# ---------------------------------------------------------------------------
-
-def psi_value(x, y, epsilon, kappa, delta, A):
-    """Evaluate the local JAX flux function."""
-    coefficients = solve_coefficients(epsilon, kappa, delta, A)
-    return jnp.tensordot(coefficients, basis_values(x, y), axes=(0, 0)) + particular_value(
-        x, y, A
-    )
-
-
-def normalized_pressure_jax(shape, A=DEFAULT_A, N=DEFAULT_N):
-    """Score one shape by physical normalized pressure.
-
-    Higher is better.  The grid is a simple numerical approximation: build a
-    rectangle around the shape, keep points inside the plasma, then average the
-    normalized flux over those points.
-    """
-    epsilon, kappa, delta = shape
-    x = jnp.linspace(1.0 - epsilon, 1.0 + epsilon, int(N))
-    y = jnp.linspace(-kappa * epsilon, kappa * epsilon, int(N))
-    X, Y = jnp.meshgrid(x, y, indexing="xy")
-
-    flux = psi_value(X, Y, epsilon, kappa, delta, A)
-    inside_plasma = flux <= 0.0
-    inside_weight = inside_plasma.astype(jnp.float64)
-
-    lowest_flux = jnp.min(jnp.where(inside_plasma, flux, jnp.inf))
-    normalizing_flux = jnp.abs(lowest_flux)
-
-    dx = (x[-1] - x[0]) / (int(N) - 1)
-    dy = (y[-1] - y[0]) / (int(N) - 1)
-    cell_area = dx * dy
-
-    normalized_flux = flux / normalizing_flux
-    numerator = cell_area * jnp.sum(X * normalized_flux * inside_weight)
-    denominator = cell_area * jnp.sum(X * inside_weight)
-
-    return -numerator 
-
-#/ denominator
-def plasma_flux_min_jax(shape, A=DEFAULT_A, N=DEFAULT_N):
-    """Minimum flux inside the plasma, used by beta_t_alternative."""
-    epsilon, kappa, delta = shape
-    x = jnp.linspace(1.0 - epsilon, 1.0 + epsilon, int(N))
-    y = jnp.linspace(-kappa * epsilon, kappa * epsilon, int(N))
-    X, Y = jnp.meshgrid(x, y, indexing="xy")
-    flux = psi_value(X, Y, epsilon, kappa, delta, A)
-    inside_plasma = flux <= 0.0
-    return jnp.min(jnp.where(inside_plasma, flux, jnp.inf))
-
-
-def int_contour_boundary_jax(values, x_points):
-    """Green's theorem line integral used by pressure_utils.py."""
-    dx = x_points[1:] - x_points[:-1]
-    return -jnp.sum(values * dx)
-
-
-def poloidal_circum_jax(x_points, y_points):
-    """Approximate the poloidal circumference of a closed boundary."""
-    dx = x_points[1:] - x_points[:-1]
-    dy = y_points[1:] - y_points[:-1]
-    return jnp.sum(jnp.sqrt(dx * dx + dy * dy))
-
-
-def G_total_jax(x, y, A, coefficients):
-    """Antiderivative formula used in the toroidal-beta calculation."""
-    log_x = safe_log(x)
-    x2 = x * x
-    y2 = y * y
-
-    G_base = x**5 * y / 8.0
-    G_A = x**3 * y * (-x2 + 4.0 * log_x) / 8.0
-    G_1 = x * y
-    G_2 = x**3 * y
-    G_3 = x * y * (-x2 * log_x + y2 / 3.0)
-    G_4 = x**3 * y * (x2 - 4.0 * y2 / 3.0)
-    G_5 = x * y * (
-        15.0 * x2 * x2 * log_x
-        + x2 * y2 * (-20.0 * log_x - 15.0)
-        + 2.0 * y2 * y2
-    ) / 5.0
-    G_6 = x**3 * y * (x2 * x2 - 4.0 * x2 * y2 + 8.0 * y2 * y2 / 5.0)
-    G_7 = x * y * (
-        -105.0 * x2 * x2 * x2 * log_x
-        + x2 * x2 * y2 * (420.0 * log_x + 175.0)
-        + x2 * y2 * y2 * (-168.0 * log_x - 196.0)
-        + 8.0 * y2 * y2 * y2
-    ) / 7.0
-
-    return (
-        G_base
-        + A * G_A
-        + coefficients[0] * G_1
-        + coefficients[1] * G_2
-        + coefficients[2] * G_3
-        + coefficients[3] * G_4
-        + coefficients[4] * G_5
-        + coefficients[5] * G_6
-        + coefficients[6] * G_7
-    )
-
-
-def miller_boundary(shape, point_count=DEFAULT_VOLUME_POINTS):
-    """Return points along the closed Miller boundary for one shape."""
-    epsilon, kappa, delta = shape
-    theta = jnp.linspace(0.0, 2.0 * jnp.pi, int(point_count) + 1)
-    alpha = jnp.arcsin(delta)
-    x = 1.0 + epsilon * jnp.cos(theta + alpha * jnp.sin(theta))
-    y = kappa * epsilon * jnp.sin(theta)
-    return x, y
-
-
-def volume_jax(shape, point_count=DEFAULT_VOLUME_POINTS):
-    """Estimate the dimensionless toroidal volume from the boundary curve."""
-    x, y = miller_boundary(shape, point_count=point_count)
-    x_mid = 0.5 * (x[:-1] + x[1:])
-    y_mid = 0.5 * (y[:-1] + y[1:])
-    dx = x[1:] - x[:-1]
-    return -jnp.sum(x_mid * y_mid * dx)
-
-
-def beta_poloidal_jax(shape, A=DEFAULT_A, N=DEFAULT_VOLUME_POINTS):
-    """Poloidal beta formula shared by beta_t objectives."""
-    epsilon, kappa, delta = shape
-    x_points, y_points = miller_boundary(shape, point_count=int(N))
-    x_mid = 0.5 * (x_points[:-1] + x_points[1:])
-    y_mid = 0.5 * (y_points[:-1] + y_points[1:])
-
-    coefficients = solve_coefficients(epsilon, kappa, delta, A)
-    circum = poloidal_circum_jax(x_points, y_points)
-    volume = int_contour_boundary_jax(x_mid * y_mid, x_points)
-    psi_integral = int_contour_boundary_jax(
-        G_total_jax(x_mid, y_mid, A, coefficients),
-        x_points,
-    )
-    factor = int_contour_boundary_jax(
-        y_mid * (A / x_mid + (1.0 - A) * x_mid),
-        x_points,
-    )
-
-    return -2.0 * (1.0 - A) * (circum**2 / volume) * psi_integral * factor**-2
-
-
-def beta_toroidal_jax(shape, A=DEFAULT_A, q=DEFAULT_Q, N=DEFAULT_VOLUME_POINTS):
-    """Score one shape by toroidal beta."""
-    epsilon = shape[0]
-    beta_poloidal = beta_poloidal_jax(shape, A=A, N=N)
-    return epsilon**2 * beta_poloidal / q**2
-
-
-def inv_q_star_jax(shape, A=DEFAULT_A, N=DEFAULT_VOLUME_POINTS):
-    """Local JAX version of pressure_utils.inv_q_star."""
-    epsilon = shape[0]
-    x_points, y_points = miller_boundary(shape, point_count=int(N))
-    x_mid = 0.5 * (x_points[:-1] + x_points[1:])
-    y_mid = 0.5 * (y_points[:-1] + y_points[1:])
-
-    psi_min = plasma_flux_min_jax(shape, A=A, N=N)
-    psi_0_squared = -1.0 / ((1.0 - A) * psi_min)
-    circum = poloidal_circum_jax(x_points, y_points)
-    integral_factor = int_contour_boundary_jax(
-        y_mid * (A / x_mid + (1.0 - A) * x_mid),
-        x_points,
-    )
-
-    B_0 = 2.0
-    return -(jnp.sqrt(psi_0_squared) / (epsilon * B_0)) * integral_factor / circum
-
-
-def beta_t_alternative_jax(shape, A=DEFAULT_A, N=DEFAULT_VOLUME_POINTS):
-    """Alternative beta_t formula from pressure_utils.py."""
-    epsilon = shape[0]
-    beta_poloidal = beta_poloidal_jax(shape, A=A, N=N)
-    inv_q = inv_q_star_jax(shape, A=A, N=N)
-    return epsilon**2 * beta_poloidal * inv_q**2
 
 
 # ---------------------------------------------------------------------------
@@ -422,10 +133,10 @@ def plot_path_for_objective(path, objective_name):
 def objective_value_jax(shape, objective_name, A=DEFAULT_A, N=DEFAULT_N):
     """Evaluate the selected objective for JAX optimization."""
     if objective_name == BETA_T_ALT_OBJECTIVE:
-        return beta_t_alternative_jax(shape, A=A, N=N)
+        return utils_beta_t_alternative_jax(shape, A=A, N=N)
     if objective_name == BETA_T_OBJECTIVE:
-        return beta_toroidal_jax(shape, A=A, q=DEFAULT_Q, N=N)
-    return normalized_pressure_jax(shape, A=A, N=N)
+        return utils_beta_toroidal_jax(shape, A=A, q=DEFAULT_Q, N=N)
+    return normalized_psi_pressure_masking_jax(shape, A=A, N=N)
 
 
 def objective_from_shape(shape, objective_name, A=DEFAULT_A, N=DEFAULT_N):
@@ -451,7 +162,7 @@ def volume_from_shape(shape, point_count=DEFAULT_VOLUME_POINTS):
     if not shape_is_valid(shape):
         return np.nan
     try:
-        value = volume_jax(jnp.asarray(shape, dtype=jnp.float64), int(point_count))
+        value = utils_volume_jax(jnp.asarray(shape, dtype=jnp.float64), int(point_count))
     except (ArithmeticError, ValueError, np.linalg.LinAlgError):
         return np.nan
     return float(value)
@@ -459,7 +170,7 @@ def volume_from_shape(shape, point_count=DEFAULT_VOLUME_POINTS):
 
 def volume_margin_jax(shape, target_volume, volume_points):
     """Return the remaining volume room; positive means under the cap."""
-    return target_volume - volume_jax(shape, point_count=int(volume_points))
+    return target_volume - utils_volume_jax(shape, point_count=int(volume_points))
 
 
 # ---------------------------------------------------------------------------
@@ -477,51 +188,18 @@ def plot_flux_contours(
 ):
     """Save a contour plot of the final optimized flux."""
     epsilon, kappa, delta = np.asarray(shape, dtype=float)
-
-    x_min = max(np.finfo(float).tiny, 1.0 - epsilon - 0.05)
-    x = np.linspace(x_min, 1.0 + epsilon + 0.1, int(grid_size))
-    y = np.linspace(-kappa * epsilon - 0.05, kappa * epsilon + 0.025, int(grid_size))
-    X, Y = np.meshgrid(x, y)
-    Z = np.asarray(
-        psi_value(
-            jnp.asarray(X, dtype=jnp.float64),
-            jnp.asarray(Y, dtype=jnp.float64),
-            float(epsilon),
-            float(kappa),
-            float(delta),
-            float(A),
-        ),
-        dtype=float,
+    if output_path is None:
+        output_path = DEFAULT_PLOT
+    return plot_contour_from_shape(
+        float(epsilon),
+        float(kappa),
+        float(delta),
+        Path(output_path),
+        A=float(A),
+        grid_size=int(grid_size),
+        contour_count=int(contour_count),
+        show=show,
     )
-
-    z_min = float(np.nanmin(Z))
-    if z_min < 0:
-        contour_levels = np.linspace(z_min, 0.0, int(contour_count))
-    else:
-        contour_levels = int(contour_count)
-
-    fig, ax = plt.subplots(figsize=(7.5, 5.5), constrained_layout=True)
-    ax.contour(X, Y, Z, levels=contour_levels, cmap="jet")
-    ax.axvline(x=0.0, linestyle="--", color="black")
-    ax.set_xlabel("$R/R_{0}$", fontsize=14)
-    ax.set_ylabel("$Z/R_{0}$", fontsize=14)
-    ax.set_aspect("equal", adjustable="box")
-    ax.set_xlim(0, 1.0 + epsilon + 0.25)
-    ax.set_ylim(-kappa * epsilon - 0.2, kappa * epsilon + 0.2)
-    ax.set_title(
-        f"{objective_label(objective_name)}: "
-        f"epsilon={epsilon:.4g}, kappa={kappa:.4g}, delta={delta:.4g}, A={A:.4g}"
-    )
-
-    if output_path is not None:
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_path, dpi=200)
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-    return fig
 
 
 # ---------------------------------------------------------------------------

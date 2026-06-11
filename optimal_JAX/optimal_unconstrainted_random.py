@@ -42,6 +42,7 @@ from optimal_JAX.optimal_unconstrainted import (
     finite_float,
     format_objective,
     int_at_least,
+    objective_value,
     optimize_shape,
     positive_float,
 )
@@ -49,9 +50,9 @@ from optimal_JAX.plot_contour_from_shape import plot_contour_from_shape
 
 
 DEFAULT_RANDOM_RANGES = {
-    "epsilon": (0.020001, 0.949),
-    "kappa": (0.050001, 12.0),
-    "delta": (-0.949, 0.949),
+    "epsilon": (0.1, 0.45),
+    "kappa": (1.0, 1.7),
+    "delta": (-0.3, 0.3),
 }
 
 
@@ -169,35 +170,40 @@ def shape_ranges_from_args(args):
 
 
 def plot_objective_history(runs, objective: str, output_path: Path) -> Path:
-    """Save a PNG showing final objective value by random-start run."""
+    """Save a PNG showing objective value by optimizer step for the best run."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    run_numbers = np.array([run["run_number"] for run in runs], dtype=int)
+    run = best_run(runs)
+    if run is None:
+        raise RuntimeError("No finite final objective found; no history was saved.")
+
+    path = np.asarray(run["path"], dtype=float)
     objective_values = np.array(
-        [float(run["final_objective"]) for run in runs],
+        [
+            objective_value(
+                shape,
+                objective,
+                A=run["A"],
+                method=run["method"],
+                N=run["N"],
+                q=run["q"],
+            )
+            for shape in path
+        ],
         dtype=float,
     )
+    steps = np.arange(len(objective_values), dtype=int)
 
     fig, ax = plt.subplots(figsize=(8.0, 4.8), constrained_layout=True)
-    ax.plot(run_numbers, objective_values, marker="o", linewidth=1.5)
-    ax.set_xlabel("run iteration")
+    ax.plot(steps, objective_values, marker="o", linewidth=1.5)
+    ax.set_xlabel("optimization step")
     ax.set_ylabel(objective_label(objective))
-    ax.set_title(f"{objective_label(objective)} by random-start run")
+    ax.set_title(
+        f"{objective_label(objective)} history for best run {run['run_number']}"
+    )
     ax.grid(True, alpha=0.3)
-    ax.set_xticks(run_numbers)
-
-    finite_mask = np.isfinite(objective_values)
-    if finite_mask.any():
-        best_index = int(np.nanargmax(objective_values))
-        ax.scatter(
-            [run_numbers[best_index]],
-            [objective_values[best_index]],
-            color="tab:red",
-            zorder=3,
-            label="best",
-        )
-        ax.legend()
+    ax.set_xticks(steps)
 
     fig.savefig(output_path, dpi=200, format="png")
     plt.close(fig)

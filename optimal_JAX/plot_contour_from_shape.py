@@ -81,39 +81,51 @@ def plot_contour_from_shape(
     show: bool = False,
 ) -> Path:
     """Save a PNG contour plot for the requested shape."""
+    import matplotlib.cm as cm
+    import matplotlib.colors as mcolors
+    import matplotlib.ticker as mticker
+
     epsilon, kappa, delta = validate_shape(epsilon, kappa, delta)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     psi, _, _ = make_psi(epsilon, kappa, delta, float(A))
 
-    x_min = max(np.finfo(float).tiny, 1.0 - epsilon - 0.05)
-    x = np.linspace(x_min, 1.0 + epsilon + 0.1, int(grid_size))
-    y = np.linspace(-kappa * epsilon - 0.05, kappa * epsilon + 0.025, int(grid_size))
+    x = np.linspace(1.0 - epsilon - 0.1, 1.0 + epsilon + 0.1, int(grid_size))
+    y = np.linspace(-kappa * epsilon - 0.1, kappa * epsilon + 0.1, int(grid_size))
     X, Y = np.meshgrid(x, y)
     Z = np.asarray(psi(X, Y), dtype=float)
 
     if not np.isfinite(Z).any():
         raise ValueError("psi grid has no finite values; check the shape parameters")
 
-    z_min = float(np.nanmin(Z))
-    if z_min < 0.0:
-        contour_levels = np.linspace(z_min, 0.0, int(contour_count))
-    else:
-        contour_levels = int(contour_count)
+    interior = np.where(Z <= 0.0, Z, np.nan)
+    negative_psi = Z[np.isfinite(Z) & (Z < 0.0)]
+    if negative_psi.size == 0:
+        raise ValueError("psi grid has no finite negative values; check the shape parameters")
+
+    psi_min = float(np.min(negative_psi))
+    contour_levels = np.linspace(psi_min, 0.0, int(contour_count))
 
     plt = configure_pyplot(show)
-    fig, ax = plt.subplots(figsize=(7.5, 5.5), constrained_layout=True)
-    ax.contour(X, Y, Z, levels=contour_levels, cmap="jet")
-    ax.axvline(x=0.0, linestyle="--", color="black")
-    ax.set_xlabel("$R/R_{0}$", fontsize=14)
-    ax.set_ylabel("$Z/R_{0}$", fontsize=14)
-    ax.set_aspect("equal", adjustable="box")
-    ax.set_xlim(0.0, 1.0 + epsilon + 0.25)
-    ax.set_ylim(-kappa * epsilon - 0.2, kappa * epsilon + 0.2)
+    fig, ax = plt.subplots(figsize=(4.2, 4.3))
+    fig.subplots_adjust(left=0.13, right=0.76, top=0.93, bottom=0.11)
+
+    ax.contour(X, Y, interior, levels=contour_levels, cmap="plasma")
+    ax.set_aspect("equal")
+    ax.set_xlabel(r"$R/R_0$")
+    ax.set_ylabel(r"$Z/R_0$")
     ax.set_title(
-        f"epsilon={epsilon:.4g}, kappa={kappa:.4g}, delta={delta:.4g}, A={A:.4g}"
+        rf"$\epsilon={epsilon:.3f},\;\kappa={kappa:.3f},\;\delta={delta:.3f}$",
+        fontsize=9,
     )
+    ax.xaxis.set_major_locator(mticker.MaxNLocator(3))
+
+    norm = mcolors.Normalize(vmin=psi_min, vmax=0.0)
+    sm = cm.ScalarMappable(cmap="plasma", norm=norm)
+    sm.set_array([])
+    cax = fig.add_axes((0.79, 0.11, 0.03, 0.82))
+    fig.colorbar(sm, cax=cax, label=r"$\psi$")
 
     fig.savefig(output_path, dpi=int(dpi), format="png")
     if show:
