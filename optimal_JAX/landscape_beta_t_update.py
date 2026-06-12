@@ -66,17 +66,30 @@ TESTS = {
 }
 
 
+def darkened_colormap(name, factor):
+    """Return a darker copy of an existing Matplotlib colormap."""
+    colors = plt.get_cmap(name)(np.linspace(0.0, 1.0, 256))
+    colors[:, :3] *= float(factor)
+    return matplotlib.colors.ListedColormap(colors, name=f"{name}_dark")
+
+
+NON_FEASIBLE_CMAP = darkened_colormap("plasma", factor=0.65)
+MAX_KAPPA = 10.0
+MAX_PLOT_KAPPA = 5.0
+PARAMETER_BOUNDS = dict(beta_opt.PARAMETER_BOUNDS)
+PARAMETER_BOUNDS["kappa"] = (PARAMETER_BOUNDS["kappa"][0], MAX_KAPPA)
+
+
 def default_plot_ranges():
     """Return the per-script forced landscape ranges."""
     MIN_KAPPA = 0.5
-    MAX_KAPPA = 4.1
     MIN_EPSILON = 0.1
     MAX_EPSILON = 0.90
     MIN_DELTA = -0.70
     MAX_DELTA = 0.80
     return {
         "epsilon": (MIN_EPSILON, MAX_EPSILON),
-        "kappa": (MIN_KAPPA, MAX_KAPPA),
+        "kappa": (MIN_KAPPA, MAX_PLOT_KAPPA),
         "delta": (MIN_DELTA, MAX_DELTA),
     }
 
@@ -107,7 +120,7 @@ def clip_free_values_to_bounds(free_values, free_names):
     """Clamp SciPy boundary roundoff back inside the optimizer bounds."""
     clipped = np.asarray(free_values, dtype=float).copy()
     for index, name in enumerate(free_names):
-        low, high = beta_opt.PARAMETER_BOUNDS[name]
+        low, high = PARAMETER_BOUNDS[name]
         clipped[index] = np.clip(clipped[index], low, high)
     return clipped
 
@@ -123,6 +136,19 @@ def landscape_shape_is_valid(shape):
         and plot_ranges["epsilon"][0] <= epsilon <= plot_ranges["epsilon"][1]
         and plot_ranges["kappa"][0] <= kappa <= plot_ranges["kappa"][1]
         and plot_ranges["delta"][0] <= delta <= plot_ranges["delta"][1]
+    )
+
+
+def shape_is_valid(shape):
+    """Return True when a shape is finite inside this script's optimizer bounds."""
+    epsilon, kappa, delta = np.asarray(shape, dtype=float)
+    return (
+        np.isfinite(epsilon)
+        and np.isfinite(kappa)
+        and np.isfinite(delta)
+        and PARAMETER_BOUNDS["epsilon"][0] <= epsilon <= PARAMETER_BOUNDS["epsilon"][1]
+        and PARAMETER_BOUNDS["kappa"][0] <= kappa <= PARAMETER_BOUNDS["kappa"][1]
+        and PARAMETER_BOUNDS["delta"][0] <= delta <= PARAMETER_BOUNDS["delta"][1]
     )
 
 
@@ -280,7 +306,7 @@ def maximize_two_parameters_with_constraints(
             fixed_name=fixed_name,
             fixed_value=fixed_value,
         )
-        if not beta_opt.shape_is_valid(trial_shape):
+        if not shape_is_valid(trial_shape):
             return beta_opt.BAD_OBJECTIVE_VALUE, np.zeros(2, dtype=float)
         try:
             value, gradient = value_and_gradient(jnp.asarray(free_values, dtype=jnp.float64))
@@ -299,7 +325,7 @@ def maximize_two_parameters_with_constraints(
             fixed_name=fixed_name,
             fixed_value=fixed_value,
         )
-        if not beta_opt.shape_is_valid(trial_shape):
+        if not shape_is_valid(trial_shape):
             return -beta_opt.BAD_OBJECTIVE_VALUE
         try:
             margin, _ = volume_and_gradient(jnp.asarray(free_values, dtype=jnp.float64))
@@ -324,7 +350,7 @@ def maximize_two_parameters_with_constraints(
             fixed_name=fixed_name,
             fixed_value=fixed_value,
         )
-        if not beta_opt.shape_is_valid(trial_shape):
+        if not shape_is_valid(trial_shape):
             return -beta_opt.BAD_OBJECTIVE_VALUE
         try:
             margin, _ = q_star_and_gradient(jnp.asarray(free_values, dtype=jnp.float64))
@@ -350,7 +376,7 @@ def maximize_two_parameters_with_constraints(
         start_free_values,
         method="SLSQP",
         jac=True,
-        bounds=[beta_opt.PARAMETER_BOUNDS[name] for name in free_names],
+        bounds=[PARAMETER_BOUNDS[name] for name in free_names],
         constraints=[
             {
                 "type": "eq",
@@ -435,6 +461,31 @@ def contour_crosses_zero(values):
     return finite_values.size and np.min(finite_values) <= 0.0 <= np.max(finite_values)
 
 
+def region_constraints_satisfied_mask(
+    x_values,
+    y_values,
+    x_name,
+    y_name,
+    fixed_name,
+    fixed_value,
+    q_star_margin,
+):
+    """Return grid points satisfying q_* and kappa region constraints."""
+    q_star_ok = q_star_margin >= 0.0
+
+    if x_name == "kappa":
+        kappa_grid = np.broadcast_to(x_values, q_star_margin.shape)
+    elif y_name == "kappa":
+        kappa_grid = np.broadcast_to(y_values[:, np.newaxis], q_star_margin.shape)
+    elif fixed_name == "kappa":
+        kappa_grid = np.full_like(q_star_margin, float(fixed_value), dtype=float)
+    else:
+        kappa_grid = np.full_like(q_star_margin, np.nan, dtype=float)
+    kappa_ok = kappa_grid <= MAX_KAPPA
+
+    return q_star_ok & kappa_ok
+
+
 def landscape_values(test, fixed_value, x_range, y_range, grid_size, p_0, A, N, volume_points):
     """Evaluate beta_t, volume error, and q_* margin over the plotted ranges."""
     x_name, y_name = test["free"]
@@ -494,16 +545,44 @@ def draw_landscape_panel(
     )
 
     finite_beta_t = beta_t[np.isfinite(beta_t)]
+    legend_handles = []
+    legend_labels = []
     if finite_beta_t.size == 0:
         ax.text(0.5, 0.5, "No finite beta_t values", ha="center", va="center")
     else:
-        filled = ax.contourf(x_values, y_values, beta_t, levels=35, cmap="plasma")
+        constraint_mask = region_constraints_satisfied_mask(
+            x_values,
+            y_values,
+            x_name=x_name,
+            y_name=y_name,
+            fixed_name=run["fixed_name"],
+            fixed_value=run["fixed_value"],
+            q_star_margin=q_star_margin,
+        )
+        levels = np.linspace(np.min(finite_beta_t), np.max(finite_beta_t), 36)
+        feasible_beta_t = np.ma.masked_where(~constraint_mask | ~np.isfinite(beta_t), beta_t)
+        has_feasible = np.any(~feasible_beta_t.mask)
+
+        filled = ax.contourf(
+            x_values,
+            y_values,
+            beta_t,
+            levels=levels,
+            cmap=NON_FEASIBLE_CMAP,
+        )
+        if has_feasible:
+            filled = ax.contourf(
+                x_values,
+                y_values,
+                feasible_beta_t,
+                levels=levels,
+                cmap="plasma",
+            )
         lines = ax.contour(x_values, y_values, beta_t, levels=12, colors="black", alpha=0.25)
         ax.clabel(lines, inline=True, fontsize=8)
-        fig.colorbar(filled, ax=ax, label="beta_t")
+        if filled is not None:
+            fig.colorbar(filled, ax=ax, label="beta_t")
 
-    legend_handles = []
-    legend_labels = []
     if contour_crosses_zero(volume_error):
         ax.contour(x_values, y_values, volume_error, levels=[0.0], colors="crimson", linewidths=2.5)
         legend_handles.append(Line2D([0], [0], color="crimson", linewidth=2.5))
@@ -520,14 +599,14 @@ def draw_landscape_panel(
         )
         legend_handles.append(Line2D([0], [0], color="orange", linewidth=2.5, linestyle="--"))
         legend_labels.append("q_* = 2")
-    if x_name == "kappa" and x_range[0] <= beta_opt.MAX_KAPPA <= x_range[1]:
-        ax.axvline(beta_opt.MAX_KAPPA, color="magenta", linewidth=2.0, linestyle=":")
+    if x_name == "kappa" and x_range[0] <= MAX_KAPPA <= x_range[1]:
+        ax.axvline(MAX_KAPPA, color="magenta", linewidth=2.0, linestyle=":")
         legend_handles.append(Line2D([0], [0], color="magenta", linewidth=2.0, linestyle=":"))
-        legend_labels.append("kappa = 2.1")
-    if y_name == "kappa" and y_range[0] <= beta_opt.MAX_KAPPA <= y_range[1]:
-        ax.axhline(beta_opt.MAX_KAPPA, color="magenta", linewidth=2.0, linestyle=":")
+        legend_labels.append(f"kappa = {MAX_KAPPA:g}")
+    if y_name == "kappa" and y_range[0] <= MAX_KAPPA <= y_range[1]:
+        ax.axhline(MAX_KAPPA, color="magenta", linewidth=2.0, linestyle=":")
         legend_handles.append(Line2D([0], [0], color="magenta", linewidth=2.0, linestyle=":"))
-        legend_labels.append("kappa = 2.1")
+        legend_labels.append(f"kappa = {MAX_KAPPA:g}")
 
     draw_path(ax, run["path"])
     ax.set_xlabel(PARAMETER_LABEL[x_name])
@@ -620,7 +699,7 @@ def print_run_summary(test_name, run, output_path, target_volume):
     print(f"  final q_* margin: {run['final_q_star_margin']:.8g}")
     print(f"  volume constraint satisfied: {abs(run['final_volume_margin']) <= 1e-7}")
     print(f"  q_* constraint satisfied: {run['final_q_star'] >= beta_opt.MIN_Q_STAR - 1e-7}")
-    print(f"  kappa constraint satisfied: {kappa <= beta_opt.MAX_KAPPA + 1e-7}")
+    print(f"  kappa constraint satisfied: {kappa <= MAX_KAPPA + 1e-7}")
     print(f"  plot: {output_path}")
 
 
@@ -643,7 +722,7 @@ def parse_args():
     parser.add_argument(
         "--plot-layout",
         choices=("subplots", "separate"),
-        default="subplots",
+        default="separate",
     )
     return parser.parse_args()
 
@@ -671,7 +750,7 @@ def main():
     print(f"  delta_sep:   {beta_opt.delta_sep:.8g}")
     print(f"  V_sep:       {target_volume:.8g}")
     print(f"  q_* minimum: {beta_opt.MIN_Q_STAR:.8g}")
-    print(f"  kappa max:   {beta_opt.MAX_KAPPA:.8g}")
+    print(f"  kappa max:   {MAX_KAPPA:.8g}")
 
     runs_by_test_name = {}
     for test_name in test_names:
