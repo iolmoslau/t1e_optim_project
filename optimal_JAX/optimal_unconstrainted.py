@@ -45,9 +45,9 @@ DEFAULT_N = 500
 DEFAULT_METHOD = "contour"
 DEFAULT_Q = 2.0
 DEFAULT_MAXITER = 200
-DEFAULT_FTOL = 1e-8
-DEFAULT_GTOL = 1e-5
-DEFAULT_FINITE_DIFF_STEP = 1e-5
+DEFAULT_FTOL = 1e-13
+DEFAULT_GTOL = 1e-10
+DEFAULT_FINITE_DIFF_STEP = 1e-10
 DEFAULT_POSITIVE_FLOOR = 0.10
 DEFAULT_OUTPUT_DIR = Path("optimal_JAX/output")
 BAD_OBJECTIVE_VALUE = 1e100
@@ -385,6 +385,7 @@ def optimize_shape(
         return value, gradient
 
     initial_objective, initial_gradient = value_and_gradient(initial_shape)
+    path = [initial_shape.copy()]
 
     def negative_objective_and_gradient(shape):
         value, gradient = value_and_gradient(shape)
@@ -392,12 +393,16 @@ def optimize_shape(
             return BAD_OBJECTIVE_VALUE, np.zeros(3, dtype=float)
         return -value, -gradient
 
+    def save_optimizer_step(shape):
+        path.append(np.asarray(shape, dtype=float).copy())
+
     result = minimize(
         negative_objective_and_gradient,
         initial_shape,
         method="L-BFGS-B",
         jac=True,
         bounds=bounds,
+        callback=save_optimizer_step,
         options={
             "maxiter": int(maxiter),
             "ftol": float(ftol),
@@ -406,11 +411,14 @@ def optimize_shape(
     )
 
     final_shape = np.asarray(result.x, dtype=float)
+    if not np.allclose(path[-1], final_shape):
+        path.append(final_shape.copy())
     final_objective, final_gradient = value_and_gradient(final_shape)
     gradient_norm = float(np.linalg.norm(final_gradient))
 
     return {
         "result": result,
+        "path": np.asarray(path, dtype=float),
         "objective": objective,
         "initial_shape": initial_shape,
         "final_shape": final_shape,

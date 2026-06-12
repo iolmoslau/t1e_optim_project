@@ -18,14 +18,15 @@ The inequality-constrained problem is
     maximize pressure(shape)
     subject to volume(shape) <= target_volume
 
-Only this file defines the physics helper functions used here; it does not
-import helper functions from the rest of the project.
+Shared JAX helpers score pressure and volume. This file keeps the landscape,
+plotting, and optimizer plumbing local.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -44,6 +45,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from scipy.optimize import minimize
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from optimal_JAX.utils_JAX import (  # noqa: E402
+    beta_t_alternative_jax as utils_beta_t_alternative_jax,
+    beta_toroidal_jax as utils_beta_toroidal_jax,
+    normalized_psi_pressure_masking_jax,
+    volume_jax as utils_volume_jax,
+)
 
 
 PARAMETER_NAMES = ("epsilon", "kappa", "delta")
@@ -70,13 +83,17 @@ STARTING_POINT = np.array(
 
 TARGET_SHAPE = np.array([0.45, 1.9, 0.0], dtype=float)
 
-DEFAULT_A = -0.5
-DEFAULT_N = 60
-DEFAULT_GRID_SIZE = 20
+DEFAULT_A = -0.05
+DEFAULT_N = 500
+DEFAULT_GRID_SIZE = 40
 DEFAULT_VOLUME_POINTS = 512
-DEFAULT_MAXITER = 80
-DEFAULT_OUTPUT_DIR = Path("landscape_constrainted_output")
+DEFAULT_MAXITER = 200
+DEFAULT_OUTPUT_DIR = Path("optimal_JAX/output/landscape_vol_constrainted_output")
 BAD_OBJECTIVE_VALUE = 1e100
+DEFAULT_Q = 2.0
+NORMALIZED_OBJECTIVE = "normalized_pressure"
+BETA_T_OBJECTIVE = "beta_toroidal"
+BETA_T_ALT_OBJECTIVE = "beta_t_alternative"
 VALID_PARAMETER_BOUNDS = {
     "epsilon": (0.020001, 0.949),
     "kappa": (0.050001, 12.0),
@@ -102,168 +119,6 @@ TESTS = {
 }
 
 
-def safe_log(x):
-    """Logarithm used by the local Solov'ev basis."""
-    return jnp.log(jnp.maximum(x, 1e-12))
-
-
-def basis_values(x, y):
-    """Seven homogeneous Solov'ev basis functions."""
-    log_x = safe_log(x)
-    x2 = x * x
-    y2 = y * y
-
-    return jnp.stack(
-        [
-            jnp.ones_like(x),
-            x2,
-            y2 - x2 * log_x,
-            x2 * x2 - 4.0 * x2 * y2,
-            2.0 * y2 * y2
-            - 9.0 * x2 * y2
-            + 3.0 * x2 * x2 * log_x
-            - 12.0 * x2 * y2 * log_x,
-            x2 * x2 * x2 - 12.0 * x2 * x2 * y2 + 8.0 * x2 * y2 * y2,
-            8.0 * y2 * y2 * y2
-            - 140.0 * x2 * y2 * y2
-            + 75.0 * x2 * x2 * y2
-            - 15.0 * x2 * x2 * x2 * log_x
-            + 180.0 * x2 * x2 * y2 * log_x
-            - 120.0 * x2 * y2 * y2 * log_x,
-        ],
-        axis=0,
-    )
-
-
-def particular_value(x, y, A):
-    """Particular Solov'ev solution for source A + (1 - A) * x^2."""
-    del y
-    return A * (0.5 * x * x * safe_log(x)) + (1.0 - A) * (x**4 / 8.0)
-
-
-def basis_x(x, y):
-    return jax.jacfwd(lambda value: basis_values(value, y))(x)
-
-
-def basis_y(x, y):
-    return jax.jacfwd(lambda value: basis_values(x, value))(y)
-
-
-def basis_xx(x, y):
-    return jax.jacfwd(lambda value: basis_x(value, y))(x)
-
-
-def basis_yy(x, y):
-    return jax.jacfwd(lambda value: basis_y(x, value))(y)
-
-
-def particular_x(x, y, A):
-    return jax.grad(lambda value: particular_value(value, y, A))(x)
-
-
-def particular_y(x, y, A):
-    return jax.grad(lambda value: particular_value(x, value, A))(y)
-
-
-def particular_xx(x, y, A):
-    return jax.grad(lambda value: particular_x(value, y, A))(x)
-
-
-def particular_yy(x, y, A):
-    return jax.grad(lambda value: particular_y(x, value, A))(y)
-
-
-def solve_coefficients(epsilon, kappa, delta, A):
-    """Solve the seven boundary equations for the Solov'ev coefficients."""
-    alpha = jnp.arcsin(delta)
-    curv1 = -((1.0 + alpha) ** 2) / (epsilon * kappa**2)
-    curv2 = -kappa / (epsilon * jnp.cos(alpha) ** 2)
-    curv3 = ((1.0 - alpha) ** 2) / (epsilon * kappa**2)
-
-    x_outer = 1.0 + epsilon
-    x_inner = 1.0 - epsilon
-    x_high = 1.0 - epsilon * delta
-    y_high = kappa * epsilon
-    zero = jnp.array(0.0, dtype=jnp.float64)
-
-    rows = [
-        basis_values(x_outer, zero),
-        basis_values(x_inner, zero),
-        basis_values(x_high, y_high),
-        basis_x(x_high, y_high),
-        curv1 * basis_x(x_outer, zero) + basis_yy(x_outer, zero),
-        curv3 * basis_x(x_inner, zero) + basis_yy(x_inner, zero),
-        curv2 * basis_y(x_high, y_high) + basis_xx(x_high, y_high),
-    ]
-    matrix = jnp.stack(rows)
-
-    rhs = -jnp.stack(
-        [
-            particular_value(x_outer, zero, A),
-            particular_value(x_inner, zero, A),
-            particular_value(x_high, y_high, A),
-            particular_x(x_high, y_high, A),
-            curv1 * particular_x(x_outer, zero, A) + particular_yy(x_outer, zero, A),
-            curv3 * particular_x(x_inner, zero, A) + particular_yy(x_inner, zero, A),
-            curv2 * particular_y(x_high, y_high, A) + particular_xx(x_high, y_high, A),
-        ]
-    )
-
-    return jnp.linalg.solve(matrix, rhs)
-
-
-def psi_value(x, y, epsilon, kappa, delta, A):
-    """Evaluate the local JAX flux function."""
-    coefficients = solve_coefficients(epsilon, kappa, delta, A)
-    return jnp.tensordot(coefficients, basis_values(x, y), axes=(0, 0)) + particular_value(
-        x, y, A
-    )
-
-
-def normalized_psi_pressure_jax(shape, A=DEFAULT_A, N=DEFAULT_N):
-    """Return positive physical normalized psi pressure by a JAX masking rule."""
-    epsilon, kappa, delta = shape
-    x = jnp.linspace(1.0 - epsilon, 1.0 + epsilon, int(N))
-    y = jnp.linspace(-kappa * epsilon, kappa * epsilon, int(N))
-    X, Y = jnp.meshgrid(x, y, indexing="xy")
-
-    PSI = psi_value(X, Y, epsilon, kappa, delta, A)
-    inside = PSI <= 0.0
-    inside_float = inside.astype(jnp.float64)
-
-    psi_min = jnp.min(jnp.where(inside, PSI, jnp.inf))
-    abs_psi_min = jnp.abs(psi_min)
-
-    dx = (x[-1] - x[0]) / (int(N) - 1)
-    dy = (y[-1] - y[0]) / (int(N) - 1)
-    dA = dx * dy
-
-    normalized_psi = PSI / abs_psi_min
-    numerator = dA * jnp.sum(X * normalized_psi * inside_float)
-    denominator = dA * jnp.sum(X * inside_float)
-
-    return -numerator / denominator
-
-
-def miller_boundary(shape, point_count=DEFAULT_VOLUME_POINTS):
-    """Points on the shape boundary used for the volume constraint."""
-    epsilon, kappa, delta = shape
-    theta = jnp.linspace(0.0, 2.0 * jnp.pi, int(point_count) + 1)
-    alpha = jnp.arcsin(delta)
-    x = 1.0 + epsilon * jnp.cos(theta + alpha * jnp.sin(theta))
-    y = kappa * epsilon * jnp.sin(theta)
-    return x, y
-
-
-def volume_jax(shape, point_count=DEFAULT_VOLUME_POINTS):
-    """Dimensionless toroidal volume factor int x dA for the shape."""
-    x, y = miller_boundary(shape, point_count=point_count)
-    x_mid = 0.5 * (x[:-1] + x[1:])
-    y_mid = 0.5 * (y[:-1] + y[1:])
-    dx = x[1:] - x[:-1]
-    return -jnp.sum(x_mid * y_mid * dx)
-
-
 def shape_is_valid(shape):
     """Reject values that do not make a usable toroidal shape."""
     epsilon, kappa, delta = np.asarray(shape, dtype=float)
@@ -271,19 +126,57 @@ def shape_is_valid(shape):
         np.isfinite(epsilon)
         and np.isfinite(kappa)
         and np.isfinite(delta)
-        and 0.02 < epsilon < 0.95
-        and 0.05 < kappa < 12.0
-        and abs(delta) < 0.95
+        and VALID_PARAMETER_BOUNDS["epsilon"][0] <= epsilon <= VALID_PARAMETER_BOUNDS["epsilon"][1]
+        and VALID_PARAMETER_BOUNDS["kappa"][0] <= kappa <= VALID_PARAMETER_BOUNDS["kappa"][1]
+        and VALID_PARAMETER_BOUNDS["delta"][0] <= delta <= VALID_PARAMETER_BOUNDS["delta"][1]
     )
 
 
-def pressure_from_shape(shape, A=DEFAULT_A, N=DEFAULT_N):
-    """Host wrapper for the positive normalized pressure."""
+def default_plot_ranges():
+    """Return the per-script forced landscape ranges."""
+    MIN_KAPPA = 0.5
+    MAX_KAPPA = 4.1
+    MIN_EPSILON = 0.1
+    MAX_EPSILON = 0.90
+    MIN_DELTA = -0.70
+    MAX_DELTA = 0.80
+    return {
+        "epsilon": (MIN_EPSILON, MAX_EPSILON),
+        "kappa": (MIN_KAPPA, MAX_KAPPA),
+        "delta": (MIN_DELTA, MAX_DELTA),
+    }
+
+
+def objective_label(objective_name):
+    """Readable objective name for printed output and plots."""
+    if objective_name == BETA_T_ALT_OBJECTIVE:
+        return "beta_t_alternative"
+    if objective_name == BETA_T_OBJECTIVE:
+        return "beta_toroidal"
+    return "normalized pressure"
+
+
+def objective_value_jax(shape, objective_name, A=DEFAULT_A, N=DEFAULT_N):
+    """Evaluate the selected objective for JAX optimization."""
+    if objective_name == BETA_T_ALT_OBJECTIVE:
+        return utils_beta_t_alternative_jax(shape, A=A, N=N)
+    if objective_name == BETA_T_OBJECTIVE:
+        return utils_beta_toroidal_jax(shape, A=A, q=DEFAULT_Q, N=N)
+    return normalized_psi_pressure_masking_jax(shape, A=A, N=N)
+
+
+def objective_from_shape(shape, objective_name, A=DEFAULT_A, N=DEFAULT_N):
+    """Evaluate the selected objective from ordinary NumPy values."""
     shape = np.asarray(shape, dtype=float)
     if not shape_is_valid(shape):
         return np.nan
     try:
-        value = normalized_psi_pressure_jax(jnp.asarray(shape, dtype=jnp.float64), float(A), int(N))
+        value = objective_value_jax(
+            jnp.asarray(shape, dtype=jnp.float64),
+            objective_name,
+            A=float(A),
+            N=int(N),
+        )
     except (ArithmeticError, ValueError, np.linalg.LinAlgError):
         return np.nan
     return float(value)
@@ -295,7 +188,7 @@ def volume_from_shape(shape, point_count=DEFAULT_VOLUME_POINTS):
     if not shape_is_valid(shape):
         return np.nan
     try:
-        value = volume_jax(jnp.asarray(shape, dtype=jnp.float64), int(point_count))
+        value = utils_volume_jax(jnp.asarray(shape, dtype=jnp.float64), int(point_count))
     except (ArithmeticError, ValueError, np.linalg.LinAlgError):
         return np.nan
     return float(value)
@@ -323,22 +216,23 @@ def free_values_from_shape(shape, free_names):
     return np.array([shape[PARAMETER_INDEX[name]] for name in free_names], dtype=float)
 
 
-def pressure_for_free_values_jax(
+def objective_for_free_values_jax(
     free_values,
     free_names,
     fixed_name,
     fixed_value,
+    objective_name,
     A,
     N,
 ):
-    """Pressure as a function of only the two free variables."""
+    """Selected objective as a function of only the two free variables."""
     shape = shape_from_free_values_jax(
         free_values,
         free_names=free_names,
         fixed_name=fixed_name,
         fixed_value=fixed_value,
     )
-    return normalized_psi_pressure_jax(shape, A=float(A), N=int(N))
+    return objective_value_jax(shape, objective_name, A=float(A), N=int(N))
 
 
 def volume_margin_for_free_values_jax(
@@ -356,12 +250,13 @@ def volume_margin_for_free_values_jax(
         fixed_name=fixed_name,
         fixed_value=fixed_value,
     )
-    return target_volume - volume_jax(shape, point_count=int(volume_points))
+    return target_volume - utils_volume_jax(shape, point_count=int(volume_points))
 
 
 def maximize_two_parameters_with_volume_limit(
     test,
     target_volume,
+    objective_name=NORMALIZED_OBJECTIVE,
     A=DEFAULT_A,
     N=DEFAULT_N,
     maxiter=DEFAULT_MAXITER,
@@ -380,15 +275,16 @@ def maximize_two_parameters_with_volume_limit(
         fixed_name=fixed_name,
         fixed_value=fixed_value,
     )
-    initial_pressure = pressure_from_shape(initial_shape, A=A, N=N)
+    initial_objective = objective_from_shape(initial_shape, objective_name, A=A, N=N)
     initial_volume = volume_from_shape(initial_shape, point_count=volume_points)
 
     value_and_gradient = jax.value_and_grad(
-        lambda free_values: -pressure_for_free_values_jax(
+        lambda free_values: -objective_for_free_values_jax(
             free_values,
             free_names=free_names,
             fixed_name=fixed_name,
             fixed_value=fixed_value,
+            objective_name=objective_name,
             A=float(A),
             N=int(N),
         )
@@ -478,7 +374,7 @@ def maximize_two_parameters_with_volume_limit(
         fixed_name=fixed_name,
         fixed_value=fixed_value,
     )
-    final_pressure = pressure_from_shape(final_shape, A=A, N=N)
+    final_objective = objective_from_shape(final_shape, objective_name, A=A, N=N)
     final_volume = volume_from_shape(final_shape, point_count=volume_points)
     final_volume_margin = target_volume - final_volume
 
@@ -488,10 +384,11 @@ def maximize_two_parameters_with_volume_limit(
         "fixed_name": fixed_name,
         "fixed_value": fixed_value,
         "free_names": free_names,
-        "initial_pressure": initial_pressure,
+        "objective_name": objective_name,
+        "initial_objective": initial_objective,
         "initial_volume": initial_volume,
         "final_shape": final_shape,
-        "final_pressure": final_pressure,
+        "final_objective": final_objective,
         "final_volume": final_volume,
         "final_volume_margin": final_volume_margin,
     }
@@ -512,36 +409,6 @@ def draw_path(ax, path, label="constrained solve path", color="white"):
     ax.scatter(path[-1, 0], path[-1, 1], color="red", edgecolor="black", s=90, label="finish")
 
 
-def plot_range_for_path(name, path_values, padding_fraction=0.05):
-    """Use the configured range, expanded enough to include the full path."""
-    starting_low, starting_high = STARTING_RANGES[name]
-    low, high = starting_low, starting_high
-    finite_path = np.asarray(path_values, dtype=float)
-    finite_path = finite_path[np.isfinite(finite_path)]
-    if finite_path.size:
-        path_low = float(np.min(finite_path))
-        path_high = float(np.max(finite_path))
-        low = min(low, path_low)
-        high = max(high, path_high)
-    else:
-        path_low = starting_low
-
-    width = high - low
-    if width <= 0:
-        width = max(1.0, abs(low))
-    padding = padding_fraction * width
-
-    high = high + padding
-    if name in ("epsilon", "kappa") and path_low > 0:
-        if path_low >= starting_low:
-            low = starting_low
-        else:
-            low = max(path_low / (1.0 + padding_fraction), 1e-6)
-    else:
-        low = low - padding
-    return (low, high)
-
-
 def should_use_log_axis(name, value_range):
     """Use log spacing when a positive parameter spans a large range."""
     low, high = value_range
@@ -555,13 +422,31 @@ def values_for_axis(name, value_range, count):
     return np.linspace(*value_range, int(count))
 
 
-def landscape_values(test, fixed_value, x_range, y_range, grid_size, A, N, volume_points):
-    """Evaluate pressure and volume over the plotted ranges."""
+def validate_plot_range(name, value_range):
+    """Return a finite increasing plot range."""
+    low, high = np.asarray(value_range, dtype=float)
+    if not np.isfinite(low) or not np.isfinite(high) or low >= high:
+        raise ValueError(f"--{name}-range must be two finite values with LOW < HIGH.")
+    return (float(low), float(high))
+
+
+def landscape_values(
+    test,
+    fixed_value,
+    x_range,
+    y_range,
+    grid_size,
+    objective_name,
+    A,
+    N,
+    volume_points,
+):
+    """Evaluate the selected objective and volume over the plotted ranges."""
     x_name, y_name = test["free"]
     x_values = values_for_axis(x_name, x_range, grid_size)
     y_values = values_for_axis(y_name, y_range, grid_size)
-    pressure = np.empty((len(y_values), len(x_values)), dtype=float)
-    volume_error = np.empty_like(pressure)
+    objective_values = np.empty((len(y_values), len(x_values)), dtype=float)
+    volume_error = np.empty_like(objective_values)
 
     target_volume = volume_from_shape(TARGET_SHAPE, point_count=volume_points)
 
@@ -573,28 +458,44 @@ def landscape_values(test, fixed_value, x_range, y_range, grid_size, A, N, volum
                 fixed_name=test["fixed"],
                 fixed_value=fixed_value,
             )
-            pressure[row, column] = pressure_from_shape(shape, A=A, N=N)
+            objective_values[row, column] = objective_from_shape(
+                shape,
+                objective_name,
+                A=A,
+                N=N,
+            )
             volume_error[row, column] = (
                 volume_from_shape(shape, point_count=volume_points) - target_volume
             )
 
-    return x_values, y_values, pressure, volume_error
+    return x_values, y_values, objective_values, volume_error
 
 
-def plot_landscape(test_name, run, grid_size, output_dir, A, N, volume_points):
-    """Plot one pressure landscape, volume-limit contour, and solve path."""
+def plot_landscape(
+    test_name,
+    run,
+    grid_size,
+    output_dir,
+    plot_ranges,
+    objective_name,
+    A,
+    N,
+    volume_points,
+):
+    """Plot one objective landscape, volume-limit contour, and solve path."""
     test = TESTS[test_name]
     x_name, y_name = run["free_names"]
     path = run["path"]
-    x_range = plot_range_for_path(x_name, path[:, 0])
-    y_range = plot_range_for_path(y_name, path[:, 1])
+    x_range = plot_ranges[x_name]
+    y_range = plot_ranges[y_name]
 
-    x_values, y_values, pressure, volume_error = landscape_values(
+    x_values, y_values, objective_values, volume_error = landscape_values(
         test,
         fixed_value=run["fixed_value"],
         x_range=x_range,
         y_range=y_range,
         grid_size=grid_size,
+        objective_name=objective_name,
         A=A,
         N=N,
         volume_points=volume_points,
@@ -604,14 +505,21 @@ def plot_landscape(test_name, run, grid_size, output_dir, A, N, volume_points):
     output_path = output_dir / test["output"]
     fig, ax = plt.subplots(figsize=(8.0, 6.0), constrained_layout=True)
 
-    finite_pressure = pressure[np.isfinite(pressure)]
-    if finite_pressure.size == 0:
-        ax.text(0.5, 0.5, "No finite pressure values", ha="center", va="center")
+    finite_objective = objective_values[np.isfinite(objective_values)]
+    if finite_objective.size == 0:
+        ax.text(0.5, 0.5, "No finite objective values", ha="center", va="center")
     else:
-        filled = ax.contourf(x_values, y_values, pressure, levels=35, cmap="viridis")
-        lines = ax.contour(x_values, y_values, pressure, levels=12, colors="black", alpha=0.25)
+        filled = ax.contourf(x_values, y_values, objective_values, levels=35, cmap="viridis")
+        lines = ax.contour(
+            x_values,
+            y_values,
+            objective_values,
+            levels=12,
+            colors="black",
+            alpha=0.25,
+        )
         ax.clabel(lines, inline=True, fontsize=8)
-        fig.colorbar(filled, ax=ax, label="physical normalized pressure")
+        fig.colorbar(filled, ax=ax, label=objective_label(objective_name))
 
     finite_volume_error = volume_error[np.isfinite(volume_error)]
     if finite_volume_error.size and np.min(finite_volume_error) <= 0.0 <= np.max(finite_volume_error):
@@ -654,6 +562,7 @@ def print_run_summary(test_name, run, output_path, target_volume):
     """Print the optimization result in a compact, readable form."""
     result = run["result"]
     epsilon, kappa, delta = run["final_shape"]
+    label = objective_label(run["objective_name"])
     print(f"\n{test_name}")
     print(f"  fixed {run['fixed_name']}: {run['fixed_value']:.8g}")
     print(f"  optimizer success: {bool(result.success)}")
@@ -661,8 +570,8 @@ def print_run_summary(test_name, run, output_path, target_volume):
     print(f"  final epsilon: {epsilon:.8g}")
     print(f"  final kappa:   {kappa:.8g}")
     print(f"  final delta:   {delta:.8g}")
-    print(f"  starting physical normalized pressure: {run['initial_pressure']:.8g}")
-    print(f"  final physical normalized pressure: {run['final_pressure']:.8g}")
+    print(f"  starting {label}: {run['initial_objective']:.8g}")
+    print(f"  final {label}: {run['final_objective']:.8g}")
     print(f"  maximum allowed volume: {target_volume:.8g}")
     print(f"  starting volume: {run['initial_volume']:.8g}")
     print(f"  final volume: {run['final_volume']:.8g}")
@@ -672,8 +581,9 @@ def print_run_summary(test_name, run, output_path, target_volume):
 
 
 def parse_args():
+    plot_ranges = default_plot_ranges()
     parser = argparse.ArgumentParser(
-        description="Maximize physical normalized pressure with a volume upper bound."
+        description="Plot optimal_vol_constrainted.py objective landscapes."
     )
     parser.add_argument(
         "--test",
@@ -681,11 +591,46 @@ def parse_args():
         default="all",
         help="Which fixed-parameter test to run.",
     )
+    objective_group = parser.add_mutually_exclusive_group()
+    objective_group.add_argument(
+        "--beta_t",
+        action="store_true",
+        help="Maximize beta_toroidal instead of normalized pressure.",
+    )
+    objective_group.add_argument(
+        "--beta_t_alt",
+        action="store_true",
+        help="Maximize beta_t_alternative instead of normalized pressure.",
+    )
     parser.add_argument(
         "--grid-size",
         type=int,
         default=DEFAULT_GRID_SIZE,
         help="Number of landscape samples along each plotted axis.",
+    )
+    parser.add_argument(
+        "--epsilon-range",
+        type=float,
+        nargs=2,
+        metavar=("LOW", "HIGH"),
+        default=plot_ranges["epsilon"],
+        help="Plot range to use whenever epsilon is an axis.",
+    )
+    parser.add_argument(
+        "--kappa-range",
+        type=float,
+        nargs=2,
+        metavar=("LOW", "HIGH"),
+        default=plot_ranges["kappa"],
+        help="Plot range to use whenever kappa is an axis.",
+    )
+    parser.add_argument(
+        "--delta-range",
+        type=float,
+        nargs=2,
+        metavar=("LOW", "HIGH"),
+        default=plot_ranges["delta"],
+        help="Plot range to use whenever delta is an axis.",
     )
     parser.add_argument(
         "--N",
@@ -729,6 +674,18 @@ def main():
     if args.volume_points < 16:
         raise ValueError("--volume-points must be at least 16.")
 
+    plot_ranges = {
+        "epsilon": validate_plot_range("epsilon", args.epsilon_range),
+        "kappa": validate_plot_range("kappa", args.kappa_range),
+        "delta": validate_plot_range("delta", args.delta_range),
+    }
+    if args.beta_t_alt:
+        objective_name = BETA_T_ALT_OBJECTIVE
+    elif args.beta_t:
+        objective_name = BETA_T_OBJECTIVE
+    else:
+        objective_name = NORMALIZED_OBJECTIVE
+
     target_volume = volume_from_shape(TARGET_SHAPE, point_count=args.volume_points)
     test_names = list(TESTS) if args.test == "all" else [args.test]
 
@@ -737,11 +694,13 @@ def main():
     print(f"  kappa:   {TARGET_SHAPE[1]:.8g}")
     print(f"  delta:   {TARGET_SHAPE[2]:.8g}")
     print(f"  volume:  {target_volume:.8g}")
+    print(f"objective: {objective_label(objective_name)}")
 
     for test_name in test_names:
         run = maximize_two_parameters_with_volume_limit(
             TESTS[test_name],
             target_volume=target_volume,
+            objective_name=objective_name,
             A=args.A,
             N=args.N,
             maxiter=args.maxiter,
@@ -752,6 +711,8 @@ def main():
             run,
             grid_size=args.grid_size,
             output_dir=args.output_dir,
+            plot_ranges=plot_ranges,
+            objective_name=objective_name,
             A=args.A,
             N=args.N,
             volume_points=args.volume_points,

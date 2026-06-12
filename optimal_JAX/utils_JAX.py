@@ -21,6 +21,7 @@ from pressure_integral.psi_anti_deriv_exact import G_total as _pressure_G_total
 MU_0 = 4 * np.pi * 1e-7
 DEFAULT_A = -0.05
 DEFAULT_N = 500
+P_0 = 2e6
 
 __all__ = [
     "make_psi",
@@ -36,6 +37,18 @@ __all__ = [
     "beta_t_alternative",
     "beta_poloidal",
     "beta_toroidal",
+    "int_contour_boundary_jax",
+    "poloidal_circum_jax",
+    "volume_jax",
+    "normalized_psi_pressure_masking_jax",
+    "beta_poloidal_jax",
+    "inv_q_star_jax",
+    "beta_toroidal_jax",
+    "beta_t_alternative_jax",
+    "average_pressure_updated_jax",
+    "beta_poloidal_updated_jax",
+    "q_star_updated_jax",
+    "beta_toroidal_updated_jax",
     "beta_poloidal_updated",
     "q_star_updated",
     "beta_toroidal_updated",
@@ -327,6 +340,185 @@ def miller_boundary(shape, point_count=DEFAULT_N):
     return x, y
 
 
+def int_contour_boundary_jax(values, x_points):
+    """Green's theorem line integral used by JAX objectives."""
+    dx = x_points[1:] - x_points[:-1]
+    return -jnp.sum(values * dx)
+
+
+def poloidal_circum_jax(x_points, y_points):
+    """Approximate the poloidal circumference of a closed boundary."""
+    dx = x_points[1:] - x_points[:-1]
+    dy = y_points[1:] - y_points[:-1]
+    return jnp.sum(jnp.sqrt(dx * dx + dy * dy))
+
+
+def volume_jax(shape, point_count=DEFAULT_N):
+    """Estimate the dimensionless toroidal volume from the boundary curve."""
+    x_points, y_points = miller_boundary(shape, point_count=point_count)
+    x_mid = 0.5 * (x_points[:-1] + x_points[1:])
+    y_mid = 0.5 * (y_points[:-1] + y_points[1:])
+    return int_contour_boundary_jax(x_mid * y_mid, x_points)
+
+
+def normalized_psi_pressure_masking_jax(shape, A=DEFAULT_A, N=DEFAULT_N):
+    """Positive normalized psi pressure from a simple JAX grid mask."""
+    epsilon, kappa, delta = shape
+    x = jnp.linspace(1.0 - epsilon, 1.0 + epsilon, int(N))
+    y = jnp.linspace(-kappa * epsilon, kappa * epsilon, int(N))
+    X, Y = jnp.meshgrid(x, y, indexing="xy")
+
+    flux = psi_value(X, Y, epsilon, kappa, delta, A)
+    inside_plasma = flux <= 0.0
+    inside_weight = inside_plasma.astype(jnp.float64)
+
+    lowest_flux = jnp.min(jnp.where(inside_plasma, flux, jnp.inf))
+    normalizing_flux = jnp.abs(lowest_flux)
+
+    dx = (x[-1] - x[0]) / (int(N) - 1)
+    dy = (y[-1] - y[0]) / (int(N) - 1)
+    cell_area = dx * dy
+
+    normalized_flux = flux / normalizing_flux
+    numerator = cell_area * jnp.sum(X * normalized_flux * inside_weight)
+    denominator = cell_area * jnp.sum(X * inside_weight)
+    return -numerator / denominator
+
+
+def _plasma_flux_min_jax(shape, A=DEFAULT_A, N=DEFAULT_N):
+    epsilon, kappa, delta = shape
+    x = jnp.linspace(1.0 - epsilon, 1.0 + epsilon, int(N))
+    y = jnp.linspace(-kappa * epsilon, kappa * epsilon, int(N))
+    X, Y = jnp.meshgrid(x, y, indexing="xy")
+    flux = psi_value(X, Y, epsilon, kappa, delta, A)
+    inside_plasma = flux <= 0.0
+    return jnp.min(jnp.where(inside_plasma, flux, jnp.inf))
+
+
+def beta_poloidal_jax(shape, A=DEFAULT_A, N=DEFAULT_N):
+    """Poloidal beta formula shared by beta_t objectives."""
+    epsilon, kappa, delta = shape
+    x_points, y_points = miller_boundary(shape, point_count=int(N))
+    x_mid = 0.5 * (x_points[:-1] + x_points[1:])
+    y_mid = 0.5 * (y_points[:-1] + y_points[1:])
+
+    coefficients = solve_coefficients(epsilon, kappa, delta, A)
+    circum = poloidal_circum_jax(x_points, y_points)
+    volume = int_contour_boundary_jax(x_mid * y_mid, x_points)
+    psi_integral = int_contour_boundary_jax(
+        G_total(x_mid, y_mid, A, coefficients),
+        x_points,
+    )
+    factor = int_contour_boundary_jax(
+        y_mid * (A / x_mid + (1.0 - A) * x_mid),
+        x_points,
+    )
+
+    return -2.0 * (1.0 - A) * (circum**2 / volume) * psi_integral * factor**-2
+
+
+def inv_q_star_jax(shape, A=DEFAULT_A, N=DEFAULT_N):
+    """JAX version of the inverse cylindrical safety factor 1/q*."""
+    epsilon = shape[0]
+    x_points, y_points = miller_boundary(shape, point_count=int(N))
+    x_mid = 0.5 * (x_points[:-1] + x_points[1:])
+    y_mid = 0.5 * (y_points[:-1] + y_points[1:])
+
+    psi_min = _plasma_flux_min_jax(shape, A=A, N=N)
+    psi_0_squared = -1.0 / ((1.0 - A) * psi_min)
+    circum = poloidal_circum_jax(x_points, y_points)
+    integral_factor = int_contour_boundary_jax(
+        y_mid * (A / x_mid + (1.0 - A) * x_mid),
+        x_points,
+    )
+
+    B_0 = 2.0
+    return -(jnp.sqrt(psi_0_squared) / (epsilon * B_0)) * integral_factor / circum
+
+
+def beta_toroidal_jax(shape, A=DEFAULT_A, q=2.0, N=DEFAULT_N):
+    """Toroidal beta from plasma shape and a prescribed safety factor q."""
+    epsilon = shape[0]
+    beta_p = beta_poloidal_jax(shape, A=A, N=N)
+    return epsilon**2 * beta_p / q**2
+
+
+def beta_t_alternative_jax(shape, A=DEFAULT_A, N=DEFAULT_N):
+    """Alternative toroidal beta using inv_q_star."""
+    epsilon = shape[0]
+    beta_p = beta_poloidal_jax(shape, A=A, N=N)
+    inv_q = inv_q_star_jax(shape, A=A, N=N)
+    return epsilon**2 * beta_p * inv_q**2
+
+
+def average_pressure_updated_jax(shape, p_0=P_0, A=DEFAULT_A, N=DEFAULT_N):
+    """Pressure-scaled contour volume average of Psi / Psi_min inside the plasma."""
+    epsilon, kappa, delta = shape
+    x = jnp.linspace(1.0 - epsilon, 1.0 + epsilon, int(N))
+    y = jnp.linspace(-kappa * epsilon, kappa * epsilon, int(N))
+    X, Y = jnp.meshgrid(x, y, indexing="xy")
+
+    flux = psi_value(X, Y, epsilon, kappa, delta, A)
+    inside_plasma = flux <= 0.0
+    psi_min = jnp.min(jnp.where(inside_plasma, flux, jnp.inf))
+
+    x_points, y_points = miller_boundary(shape, point_count=int(N))
+    x_mid = 0.5 * (x_points[:-1] + x_points[1:])
+    y_mid = 0.5 * (y_points[:-1] + y_points[1:])
+    coefficients = solve_coefficients(epsilon, kappa, delta, A)
+    numerator = int_contour_boundary_jax(
+        G_total(x_mid, y_mid, A, coefficients) / psi_min,
+        x_points,
+    )
+    denominator = int_contour_boundary_jax(x_mid * y_mid, x_points)
+    return p_0 * numerator / denominator
+
+
+def beta_poloidal_updated_jax(shape, average_pressure, R_0, I):
+    """Poloidal beta from the provided volume-averaged pressure."""
+    epsilon, kappa, _ = shape
+    return (
+        4.0
+        * jnp.pi**2
+        * epsilon**2
+        * R_0**2
+        * (1.0 + kappa**2)
+        * average_pressure
+        / (MU_0 * I**2)
+    )
+
+
+def q_star_updated_jax(shape, R_0, I, B_0):
+    """Cylindrical safety factor q_* from physical parameters."""
+    epsilon, kappa, _ = shape
+    return (
+        2.0
+        * jnp.pi
+        * epsilon**2
+        * R_0**2
+        * B_0
+        / (MU_0 * R_0 * I)
+        * ((1.0 + kappa**2) / 2.0)
+    )
+
+
+def beta_toroidal_updated_jax(
+    shape,
+    p_0=P_0,
+    A=DEFAULT_A,
+    N=DEFAULT_N,
+    R_0=1.85,
+    I=8.7e6,
+    B_0=12.2,
+):
+    """Toroidal beta matching beta_toroidal_updated with JAX operations."""
+    epsilon, kappa, _ = shape
+    average_pressure = average_pressure_updated_jax(shape, p_0=p_0, A=A, N=N)
+    beta_p = beta_poloidal_updated_jax(shape, average_pressure, R_0=R_0, I=I)
+    q_star = q_star_updated_jax(shape, R_0=R_0, I=I, B_0=B_0)
+    return epsilon**2 * beta_p / q_star**2 * ((1.0 + kappa**2) / 2.0)
+
+
 def _boundary_midpoints(xs, ys):
     x0, x1 = xs[:-1], xs[1:]
     y0, y1 = ys[:-1], ys[1:]
@@ -567,18 +759,18 @@ def beta_poloidal_updated(
     delta,
     R_0: float,
     I: float,
+    P_0: float = P_0,
     A: float = DEFAULT_A,
     N: int = DEFAULT_N,
 ):
     """Poloidal beta from physical parameters."""
-    p_avg = normalized_psi_pressure(epsilon, kappa, delta, A=A, N=N)
+    p_avg = P_0 * normalized_psi_pressure(epsilon, kappa, delta, A=A, N=N)
     prefactor = (
         4
         * np.pi**2
         * epsilon**2
         * R_0**2
         * (1 + kappa**2)
-        * 1e6
         / (MU_0 * I**2)
     )
     return prefactor * p_avg
@@ -605,11 +797,12 @@ def beta_toroidal_updated(
     delta,
     R_0: float,
     I: float,
-    B_0: float,
+    P_0: float = P_0,
+    B_0: float = 12.2,
     A: float = DEFAULT_A,
     N: int = DEFAULT_N,
 ):
     """Toroidal beta from physical parameters."""
-    beta_p = beta_poloidal_updated(epsilon, kappa, delta, R_0, I, A=A, N=N)
+    beta_p = beta_poloidal_updated(epsilon, kappa, delta, R_0, I, P_0=P_0, A=A, N=N)
     q_star = q_star_updated(epsilon, kappa, delta, R_0, I, B_0)
     return (epsilon**2 * beta_p / q_star**2) * (1 + kappa**2) / 2
