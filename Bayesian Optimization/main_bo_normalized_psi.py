@@ -38,14 +38,19 @@ from pressure_integral.pressure_utils import normalized_psi_pressure
 GradientBoostingQuantileRegressor.__sklearn_tags__ = lambda self: default_tags(self)
 
 
-DEFAULT_A = -0.1
-DEFAULT_BOUNDS = ((0.1, 0.45), (1, 1.7), (-0.3, 0.3))  # epsilon,kappa,delta
+DEFAULT_A = -0.05
+DEFAULT_BOUNDS = ((0.1, 0.5), (1, 4), (-0.5, 0.5))  # epsilon,kappa,delta
 PARAM_NAMES = ("epsilon", "kappa", "delta")
 PARAM_LABELS = {
     "epsilon": r"$\epsilon$",
     "kappa": r"$\kappa$",
     "delta": r"$\delta$",
 }
+LANDSCAPE_CMAP = "plasma"
+ERROR_CMAP = "PuOr"
+CALL_CMAP = "plasma"
+FIRST_CALL_COLOR = "#E69F00"
+FINAL_BEST_COLOR = "#0072B2"
 
 
 def basis_values(x, y):
@@ -724,13 +729,14 @@ def plot_fixed_parameter_objective_contours(
     bounds=DEFAULT_BOUNDS,
     fixed_values=None,
     output_path=None,
+    error_output_path=None,
     grid_size=35,
     contour_count=20,
     trajectory_every=5,
     n_quad=500,
     show=False,
 ):
-    """Plot a 2D objective landscape and BO trajectory when one parameter is fixed."""
+    """Plot true objective, surrogate prediction, and surrogate error contours."""
     import matplotlib.pyplot as plt
     import numpy as np
 
@@ -762,7 +768,7 @@ def plot_fixed_parameter_objective_contours(
     x_values = np.linspace(bounds[x_index][0], bounds[x_index][1], grid_size)
     y_values = np.linspace(bounds[y_index][0], bounds[y_index][1], grid_size)
     X, Y = np.meshgrid(x_values, y_values)
-    Z = np.full_like(X, np.nan, dtype=float)
+    Z_true = np.full_like(X, np.nan, dtype=float)
 
     for row, y_value in enumerate(y_values):
         for col, x_value in enumerate(x_values):
@@ -771,96 +777,169 @@ def plot_fixed_parameter_objective_contours(
             shape[x_index] = float(x_value)
             shape[y_index] = float(y_value)
             try:
-                Z[row, col] = objective_np(tuple(shape), A=A, n_quad=n_quad)
+                Z_true[row, col] = objective_np(tuple(shape), A=A, n_quad=n_quad)
             except Exception:
-                Z[row, col] = np.nan
+                Z_true[row, col] = np.nan
 
-    fig, ax = plt.subplots(figsize=(7.5, 5.8), constrained_layout=True)
-    finite_values = Z[np.isfinite(Z)]
-    if finite_values.size:
-        filled = ax.contourf(X, Y, Z, levels=contour_count, cmap="viridis")
-        ax.contour(X, Y, Z, levels=contour_count, colors="black", linewidths=0.35, alpha=0.45)
-        fig.colorbar(filled, ax=ax, label="normalized_psi_pressure")
+    optimizer = result.get("optimizer")
+    models = getattr(optimizer, "models", None)
+    model = models[-1] if models else None
+    Z_surrogate = np.full_like(Z_true, np.nan, dtype=float)
+
+    if model is not None:
+        grid_free = np.column_stack([X.ravel(), Y.ravel()])
+        try:
+            model_points = optimizer.space.transform(grid_free.tolist())
+        except Exception:
+            model_points = grid_free
+        try:
+            predicted_minimizer_values = model.predict(model_points)
+            Z_surrogate = -np.asarray(predicted_minimizer_values, dtype=float).reshape(X.shape)
+        except Exception:
+            model = None
+
+    Z_error = Z_surrogate - Z_true
+    valid_error = np.isfinite(Z_true) & np.isfinite(Z_surrogate)
+    if np.any(valid_error):
+        error_values = Z_error[valid_error]
+        surrogate_error = {
+            "mae": float(np.mean(np.abs(error_values))),
+            "rmse": float(np.sqrt(np.mean(error_values**2))),
+            "max_abs": float(np.max(np.abs(error_values))),
+        }
     else:
-        ax.text(0.5, 0.5, "No finite objective values", transform=ax.transAxes, ha="center", va="center")
+        surrogate_error = None
 
     shape_iters = np.asarray(result.get("shape_iters", []), dtype=float)
-    if shape_iters.size:
-        selected_indices = _trajectory_sample_indices(len(shape_iters), trajectory_every)
-        selected = shape_iters[selected_indices]
-        ax.plot(
-            selected[:, x_index],
-            selected[:, y_index],
-            color="white",
-            linewidth=2.0,
-            marker="o",
-            markersize=4.5,
-            markeredgecolor="black",
-            markerfacecolor="white",
-            label=f"BO trajectory every {trajectory_every} calls",
-        )
-        ax.scatter(
-            shape_iters[0, x_index],
-            shape_iters[0, y_index],
-            color="#f59e0b",
-            edgecolor="black",
-            s=65,
-            marker="s",
-            label="first call",
-            zorder=4,
-        )
-        for call_index, point in zip(selected_indices, selected):
-            if len(selected_indices) <= 25:
-                ax.annotate(
-                    str(call_index + 1),
-                    (point[x_index], point[y_index]),
-                    textcoords="offset points",
-                    xytext=(4, 4),
-                    fontsize=8,
-                    color="black",
-                )
-
     final_shape = np.asarray(result["shape"], dtype=float)
     best_call = result.get("best_call")
-    ax.scatter(
-        final_shape[x_index],
-        final_shape[y_index],
-        color="#ef4444",
-        edgecolor="black",
-        s=95,
-        marker="*",
-        label=f"final best (call {best_call})" if best_call is not None else "final best",
-        zorder=5,
-    )
-    if best_call is not None:
-        ax.annotate(
-            f"best call = {best_call}",
-            (final_shape[x_index], final_shape[y_index]),
-            textcoords="offset points",
-            xytext=(8, 8),
-            fontsize=9,
-            color="black",
-            weight="bold",
-        )
 
-    ax.set_xlabel(PARAM_LABELS[x_name])
-    ax.set_ylabel(PARAM_LABELS[y_name])
-    ax.set_xlim(bounds[x_index][0], bounds[x_index][1])
-    ax.set_ylim(bounds[y_index][0], bounds[y_index][1])
-    ax.set_title(
-        f"normalized_psi_pressure, fixed {fixed_name}={fixed_value:.4g}"
-    )
-    ax.legend(loc="best", fontsize=8)
+    def add_evaluation_points(fig, axes):
+        if not shape_iters.size:
+            return
+        axes = np.atleast_1d(axes)
+        calls = np.arange(1, len(shape_iters) + 1)
+        scatter = None
+        for axis in axes:
+            scatter = axis.scatter(
+                shape_iters[:, x_index],
+                shape_iters[:, y_index],
+                c=calls,
+                cmap=CALL_CMAP,
+                edgecolor="black",
+                linewidth=0.35,
+                s=34,
+                label="BO evaluations",
+                zorder=4,
+            )
+            axis.scatter(
+                shape_iters[0, x_index],
+                shape_iters[0, y_index],
+                color=FIRST_CALL_COLOR,
+                edgecolor="black",
+                s=72,
+                marker="s",
+                label="first call",
+                zorder=5,
+            )
+            axis.scatter(
+                final_shape[x_index],
+                final_shape[y_index],
+                color=FINAL_BEST_COLOR,
+                edgecolor="black",
+                s=110,
+                marker="*",
+                label=f"final best (call {best_call})" if best_call is not None else "final best",
+                zorder=6,
+            )
+        if scatter is not None:
+            fig.colorbar(scatter, ax=list(axes), label="BO call")
+
+    def format_axes(axis):
+        axis.set_xlabel(PARAM_LABELS[x_name])
+        axis.set_ylabel(PARAM_LABELS[y_name])
+        axis.set_xlim(bounds[x_index][0], bounds[x_index][1])
+        axis.set_ylim(bounds[y_index][0], bounds[y_index][1])
+
+    comparison_fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.6), constrained_layout=True)
+    comparison_values = np.concatenate([
+        Z_true[np.isfinite(Z_true)],
+        Z_surrogate[np.isfinite(Z_surrogate)],
+    ])
+    if comparison_values.size:
+        levels = np.linspace(float(np.min(comparison_values)), float(np.max(comparison_values)), contour_count)
+        if np.allclose(levels[0], levels[-1]):
+            levels = contour_count
+    else:
+        levels = contour_count
+
+    true_filled = None
+    if np.isfinite(Z_true).any():
+        true_filled = axes[0].contourf(X, Y, Z_true, levels=levels, cmap=LANDSCAPE_CMAP)
+        axes[0].contour(X, Y, Z_true, levels=levels, colors="black", linewidths=0.35, alpha=0.45)
+    else:
+        axes[0].text(0.5, 0.5, "No finite true objective values", transform=axes[0].transAxes, ha="center", va="center")
+
+    surrogate_filled = None
+    if model is not None and np.isfinite(Z_surrogate).any():
+        surrogate_filled = axes[1].contourf(X, Y, Z_surrogate, levels=levels, cmap=LANDSCAPE_CMAP)
+        axes[1].contour(X, Y, Z_surrogate, levels=levels, colors="black", linewidths=0.35, alpha=0.45)
+    else:
+        axes[1].text(0.5, 0.5, "No surrogate model available", transform=axes[1].transAxes, ha="center", va="center")
+
+    comparison_mappable = true_filled if true_filled is not None else surrogate_filled
+    if comparison_mappable is not None:
+        comparison_fig.colorbar(comparison_mappable, ax=axes, label="normalized_psi_pressure")
+
+    axes[0].set_title(f"True objective, fixed {fixed_name}={fixed_value:.4g}")
+    axes[1].set_title("Surrogate model")
+    for axis in axes:
+        format_axes(axis)
+    add_evaluation_points(comparison_fig, axes)
+    axes[0].legend(loc="best", fontsize=8)
+
+    error_fig, error_ax = plt.subplots(figsize=(7.8, 5.8), constrained_layout=True)
+    if surrogate_error is not None:
+        max_abs_error = max(surrogate_error["max_abs"], 1e-12)
+        error_levels = np.linspace(-max_abs_error, max_abs_error, contour_count)
+        error_filled = error_ax.contourf(X, Y, Z_error, levels=error_levels, cmap=ERROR_CMAP, extend="both")
+        error_ax.contour(X, Y, Z_error, levels=error_levels, colors="black", linewidths=0.3, alpha=0.35)
+        error_fig.colorbar(error_filled, ax=error_ax, label="surrogate - true")
+        error_ax.text(
+            0.02,
+            0.98,
+            f"MAE={surrogate_error['mae']:.3g}\nRMSE={surrogate_error['rmse']:.3g}\nMax={surrogate_error['max_abs']:.3g}",
+            transform=error_ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            bbox={"facecolor": "white", "edgecolor": "0.8", "alpha": 0.85},
+        )
+    else:
+        error_ax.text(0.5, 0.5, "No surrogate error available", transform=error_ax.transAxes, ha="center", va="center")
+    format_axes(error_ax)
+    error_ax.set_title(f"Surrogate error, fixed {fixed_name}={fixed_value:.4g}")
+    add_evaluation_points(error_fig, [error_ax])
+    error_ax.legend(loc="best", fontsize=8)
 
     if output_path is not None:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_path, dpi=200)
+        comparison_fig.savefig(output_path, dpi=200)
+    if error_output_path is not None:
+        error_output_path = Path(error_output_path)
+        error_output_path.parent.mkdir(parents=True, exist_ok=True)
+        error_fig.savefig(error_output_path, dpi=200)
     if show:
         plt.show()
     else:
-        plt.close(fig)
-    return fig
+        plt.close(comparison_fig)
+        plt.close(error_fig)
+    return {
+        "comparison_fig": comparison_fig,
+        "error_fig": error_fig,
+        "surrogate_error": surrogate_error,
+    }
 
 
 def _format_shape(shape):
@@ -893,11 +972,12 @@ def _build_parser():
     parser.add_argument("--plot", type=Path, help="save optimized flux contours to this path")
     parser.add_argument("--plot-grid", type=int, default=600)
     parser.add_argument("--contour-count", type=int, default=20)
-    parser.add_argument("--objective-plot", type=Path, help="save fixed-parameter objective contour trajectory plot to this path")
+    parser.add_argument("--objective-plot", type=Path, help="save fixed-parameter true/surrogate objective contour plot to this path")
+    parser.add_argument("--surrogate-error-plot", type=Path, help="save fixed-parameter surrogate error contour plot to this path")
     parser.add_argument("--objective-plot-grid", type=int, default=35)
     parser.add_argument("--objective-contour-count", type=int, default=20)
     parser.add_argument("--objective-plot-n-quad", type=int, help="N used for the objective contour grid; defaults to --n-quad")
-    parser.add_argument("--trajectory-every", type=int, default=5)
+    parser.add_argument("--trajectory-every", type=int, default=5, help="deprecated; BO points are now shown as scatter markers")
     parser.add_argument("--show-plot", action="store_true", default=True, help="show plot on completion (default: True)")
     parser.add_argument("--no-show-plot", action="store_true", help="do not show plot (overrides --show-plot)")
     parser.add_argument("--gradient-step", type=float, default=1e-3, help="finite-difference step for final gradient diagnostics")
@@ -917,8 +997,8 @@ def main(argv=None):
     fixed_count = sum(value is not None for value in fixed_values)
     if fixed_count > 1:
         parser.error("fix at most one of --fix-epsilon, --fix-kappa, or --fix-delta")
-    if args.objective_plot and fixed_count != 1:
-        parser.error("--objective-plot requires exactly one fixed parameter")
+    if (args.objective_plot or args.surrogate_error_plot) and fixed_count != 1:
+        parser.error("--objective-plot and --surrogate-error-plot require exactly one fixed parameter")
 
     result = optimize_shape_bayesian(
         bounds=bounds,
@@ -968,23 +1048,36 @@ def main(argv=None):
             perturbation_samples=args.test_perturbation_samples,
             perturbation_seed=args.test_seed,
         )
-    if result["fixed_indices"] and (args.objective_plot or show_flag):
+    if result["fixed_indices"] and (args.objective_plot or args.surrogate_error_plot or show_flag):
         objective_plot_n_quad = args.objective_plot_n_quad or args.n_quad
-        print("Computing fixed-parameter objective contour trajectory plot...")
-        plot_fixed_parameter_objective_contours(
+        print("Computing fixed-parameter true/surrogate objective contour plots...")
+        plot_result = plot_fixed_parameter_objective_contours(
             result,
             A=args.A,
             bounds=bounds,
             fixed_values=result["fixed_values"],
             output_path=args.objective_plot,
+            error_output_path=args.surrogate_error_plot,
             grid_size=args.objective_plot_grid,
             contour_count=args.objective_contour_count,
             trajectory_every=args.trajectory_every,
             n_quad=objective_plot_n_quad,
             show=show_flag,
         )
+        surrogate_error = plot_result.get("surrogate_error")
+        if surrogate_error is not None:
+            print(
+                "Surrogate error on objective grid: "
+                f"MAE={surrogate_error['mae']:.12g}, "
+                f"RMSE={surrogate_error['rmse']:.12g}, "
+                f"MaxAbs={surrogate_error['max_abs']:.12g}"
+            )
+        else:
+            print("Surrogate error on objective grid: unavailable")
         if args.objective_plot:
-            print(f"Saved objective contour trajectory plot: {args.objective_plot}")
+            print(f"Saved true/surrogate objective contour plot: {args.objective_plot}")
+        if args.surrogate_error_plot:
+            print(f"Saved surrogate error contour plot: {args.surrogate_error_plot}")
     if args.plot or args.show_plot:
         plot_flux_contours(
             result["shape"],
